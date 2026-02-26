@@ -1,0 +1,24 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=coder_agent",
+          "--manifest-path",
+          "${workspaceFolder}/Cargo.toml"
+        ]
+      },
+      "env": {
+        "CEREBRAS_API_KEY": "csk-rcnxdrprk5kj4y86wtx4f68krkyjdjvmpjkerjxxcd9rv4mv"
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "terminal": "external"
+    }
+  ]
+}

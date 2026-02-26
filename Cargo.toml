@@ -9,7 +9,17 @@ edition = "2024"
 [dependencies]
 color-eyre = "0.6.3"
 crossterm = "0.29.0"
+deno_ast = { version = "=0.53.1", features = ["transpiling"] }
+futures = "0.3"
 ratatui = "0.30.0"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+v8 = "129"
+
+# v8 miscompiles at opt-level=0
+[profile.dev.package.v8]
+opt-level = 1
 
 # Read the optimization guideline for more details: https://ratatui.rs/recipes/apps/release-your-app/#optimizations
 [profile.release]
