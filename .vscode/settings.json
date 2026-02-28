@@ -1,0 +1,13 @@
+{
+  "terminal.integrated.profiles.windows": {
+    "PowerShellWithStartup": {
+      "path": "pwsh",
+      "args": [
+        "-NoExit",
+        "-File",
+        "${workspaceFolder}/.vscode/terminal_startup.ps1"
+      ]
+    }
+  },
+  "terminal.integrated.defaultProfile.windows": "PowerShellWithStartup"
+}
