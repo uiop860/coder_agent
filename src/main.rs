@@ -4,7 +4,7 @@ use std::{
 };
 
 use coder_agent::agent::agent_stream;
-use coder_agent::client::{AgentEvent, CerebrasProvider, ChatMessage, Provider, RequestConfig};
+use coder_agent::client::{AgentEvent, OpenRouterProvider, ChatMessage, Provider, RequestConfig};
 use coder_agent::executor::JsExecutorHandle;
 use ratatui::{
     DefaultTerminal, Frame,
@@ -68,7 +68,7 @@ impl App {
         let welcome = if provider.is_some() {
             "Hello! I'm your code agent. I can write and execute TypeScript for you.\n(press Ctrl+T to toggle tool-call details, Ctrl+R to toggle reasoning, Ctrl+D to hide/show system messages)".to_string()
         } else {
-            "⚠ No CEREBRAS_API_KEY found. Set it and restart.".to_string()
+            "⚠ No OPENROUTER_API_KEY found. Set it and restart.".to_string()
         };
         Self {
             messages: vec![Message {
@@ -302,7 +302,7 @@ fn main() -> color_eyre::Result<()> {
     v8::V8::initialize_platform(platform);
     v8::V8::initialize();
 
-    let provider = CerebrasProvider::from_env().map(|p| Arc::new(p) as Arc<dyn Provider>);
+    let provider = OpenRouterProvider::from_env().map(|p| Arc::new(p) as Arc<dyn Provider>);
     let executor = Some(JsExecutorHandle::spawn());
 
     ratatui::run(|terminal| app(terminal, provider, executor))?;

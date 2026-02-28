@@ -101,16 +101,14 @@ pub struct RequestConfig {
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub system_prompt: Option<String>,
-    /// "parsed" | "raw" | "hidden" | "none"
-    pub reasoning_format: Option<String>,
-    /// "low" | "medium" | "high" (gpt-oss-120b only)
+    /// "low" | "medium" | "high" — only sent if Some
     pub reasoning_effort: Option<String>,
 }
 
 impl Default for RequestConfig {
     fn default() -> Self {
         Self {
-            model: "gpt-oss-120b".to_string(),
+            model: "nvidia/nemotron-3-nano-30b-a3b:free".to_string(),
             temperature: None,
             max_tokens: None,
             system_prompt: Some(
@@ -128,8 +126,7 @@ impl Default for RequestConfig {
                  When you are done and have the final answer, respond with plain text (no tool call)."
                     .to_string(),
             ),
-            reasoning_format: Some("parsed".to_string()),
-            reasoning_effort: Some("medium".to_string()),
+            reasoning_effort: None,
         }
     }
 }
@@ -140,27 +137,27 @@ pub trait Provider: Send + Sync {
     fn stream(&self, messages: Vec<ChatMessage>, config: &RequestConfig) -> Receiver<AgentEvent>;
 }
 
-// ── Cerebras provider ─────────────────────────────────────────────────────────
+// ── OpenRouter provider ───────────────────────────────────────────────────────
 
-pub struct CerebrasProvider {
+pub struct OpenRouterProvider {
     api_key: String,
     base_url: String,
 }
 
-impl CerebrasProvider {
+impl OpenRouterProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
-            base_url: "https://api.cerebras.ai/v1".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
         }
     }
 
     pub fn from_env() -> Option<Self> {
-        std::env::var("CEREBRAS_API_KEY").ok().map(Self::new)
+        std::env::var("OPENROUTER_API_KEY").ok().map(Self::new)
     }
 }
 
-impl Provider for CerebrasProvider {
+impl Provider for OpenRouterProvider {
     fn stream(&self, messages: Vec<ChatMessage>, config: &RequestConfig) -> Receiver<AgentEvent> {
         let (tx, rx) = channel();
         let api_key = self.api_key.clone();
@@ -170,78 +167,77 @@ impl Provider for CerebrasProvider {
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
             rt.block_on(async move {
-                // ── Build messages array ──────────────────────────────────
-                let mut msgs: Vec<Value> = Vec::new();
+                // ── Build input array (Responses API format) ──────────────
+                let mut input: Vec<Value> = Vec::new();
                 if let Some(ref sys) = config.system_prompt {
-                    msgs.push(json!({ "role": "system", "content": sys }));
+                    input.push(json!({ "type": "message", "role": "system", "content": sys }));
                 }
                 for msg in &messages {
-                    let json_msg = match &msg.role {
+                    match &msg.role {
                         ChatRole::System => {
-                            json!({ "role": "system", "content": msg.content })
+                            input.push(json!({
+                                "type": "message",
+                                "role": "system",
+                                "content": msg.content,
+                            }));
                         }
                         ChatRole::User => {
-                            json!({ "role": "user", "content": msg.content })
+                            input.push(json!({
+                                "type": "message",
+                                "role": "user",
+                                "content": msg.content,
+                            }));
                         }
                         ChatRole::Assistant => {
                             if let Some(ref tcs) = msg.tool_calls {
-                                // Assistant message that made tool calls — content may be null
-                                let tc_array: Vec<Value> = tcs
-                                    .iter()
-                                    .map(|tc| {
-                                        json!({
-                                            "id": tc.id,
-                                            "type": "function",
-                                            "function": {
-                                                "name": tc.name,
-                                                "arguments": tc.arguments,
-                                            }
-                                        })
-                                    })
-                                    .collect();
-                                json!({
-                                    "role": "assistant",
-                                    "content": Value::Null,
-                                    "tool_calls": tc_array,
-                                })
+                                // Flatten: one function_call item per tool call
+                                for tc in tcs {
+                                    input.push(json!({
+                                        "type": "function_call",
+                                        "call_id": tc.id,
+                                        "name": tc.name,
+                                        "arguments": tc.arguments,
+                                    }));
+                                }
                             } else {
-                                json!({ "role": "assistant", "content": msg.content })
+                                input.push(json!({
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": msg.content,
+                                }));
                             }
                         }
                         ChatRole::Tool { tool_call_id } => {
-                            json!({
-                                "role": "tool",
-                                "tool_call_id": tool_call_id,
-                                "content": msg.content,
-                            })
+                            input.push(json!({
+                                "type": "function_call_output",
+                                "call_id": tool_call_id,
+                                "output": msg.content,
+                            }));
                         }
-                    };
-                    msgs.push(json_msg);
+                    }
                 }
 
-                // ── Tool definition ───────────────────────────────────────
+                // ── Tool definition (flat Responses API format) ───────────
                 let tools = json!([{
                     "type": "function",
-                    "function": {
-                        "name": "run_typescript",
-                        "description": "Execute TypeScript code and return the result as a string.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "code": {
-                                    "type": "string",
-                                    "description": "TypeScript source code to execute. A top-level `return` statement sets the return value."
-                                }
-                            },
-                            "required": ["code"]
-                        }
+                    "name": "run_typescript",
+                    "description": "Execute TypeScript code and return the result as a string.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "code": {
+                                "type": "string",
+                                "description": "TypeScript source code to execute. A top-level `return` statement sets the return value."
+                            }
+                        },
+                        "required": ["code"]
                     }
                 }]);
 
                 // ── Build request body ────────────────────────────────────
                 let mut body = json!({
                     "model": config.model,
-                    "messages": msgs,
+                    "input": input,
                     "stream": true,
                     "tools": tools,
                     "tool_choice": "auto",
@@ -250,20 +246,19 @@ impl Provider for CerebrasProvider {
                     body["temperature"] = json!(t);
                 }
                 if let Some(m) = config.max_tokens {
-                    body["max_completion_tokens"] = json!(m);
+                    body["max_output_tokens"] = json!(m);
                 }
-                if let Some(ref rf) = config.reasoning_format {
-                    body["reasoning_format"] = json!(rf);
-                }
-                if let Some(ref re) = config.reasoning_effort {
-                    body["reasoning_effort"] = json!(re);
+                if let Some(ref effort) = config.reasoning_effort {
+                    body["reasoning"] = json!({ "effort": effort });
                 }
 
                 let client = reqwest::Client::new();
                 let resp = client
-                    .post(format!("{}/chat/completions", base_url))
+                    .post(format!("{}/responses", base_url))
                     .header("Authorization", format!("Bearer {}", api_key))
                     .header("Content-Type", "application/json")
+                    .header("HTTP-Referer", "https://github.com/coder_agent")
+                    .header("X-Title", "coder_agent")
                     .json(&body)
                     .send()
                     .await;
@@ -283,17 +278,15 @@ impl Provider for CerebrasProvider {
                     return;
                 }
 
-                // ── Parse SSE stream ──────────────────────────────────────
-                // Tool call arguments arrive in fragments across many chunks.
-                // We accumulate them by tool-call index, then emit a single
-                // ToolCall event when finish_reason == "tool_calls".
+                // ── Parse Responses API SSE stream ────────────────────────
+                // Keyed by output_index: (call_id, name, accumulated_arguments)
                 let mut tool_call_accum: std::collections::HashMap<usize, (String, String, String)> =
-                    std::collections::HashMap::new(); // index → (id, name, accumulated_arguments)
+                    std::collections::HashMap::new();
 
                 let mut byte_stream = response.bytes_stream();
                 let mut buffer = String::new();
 
-                while let Some(chunk) = byte_stream.next().await {
+                'outer: while let Some(chunk) = byte_stream.next().await {
                     match chunk {
                         Err(e) => {
                             let _ = tx.send(AgentEvent::Error(e.to_string()));
@@ -307,78 +300,62 @@ impl Provider for CerebrasProvider {
                                 buffer.drain(..=pos);
 
                                 if let Some(data) = line.strip_prefix("data: ") {
-                                    if data == "[DONE]" {
-                                        let _ = tx.send(AgentEvent::Done);
-                                        return;
-                                    }
                                     if let Ok(val) = serde_json::from_str::<Value>(data) {
-                                        let choice = &val["choices"][0];
-                                        let delta = &choice["delta"];
-                                        let finish_reason = choice["finish_reason"].as_str();
-
-                                        // Reasoning tokens
-                                        if let Some(reasoning) = delta["reasoning"].as_str() {
-                                            if !reasoning.is_empty() {
-                                                let _ = tx.send(AgentEvent::ReasoningToken(
-                                                    reasoning.to_string(),
-                                                ));
-                                            }
-                                        }
-
-                                        // Content tokens
-                                        if let Some(content) = delta["content"].as_str() {
-                                            if !content.is_empty() {
-                                                let _ =
-                                                    tx.send(AgentEvent::Token(content.to_string()));
-                                            }
-                                        }
-
-                                        // Tool call argument fragments
-                                        if let Some(tc_array) = delta["tool_calls"].as_array() {
-                                            for tc in tc_array {
-                                                let index = tc["index"].as_u64().unwrap_or(0)
-                                                    as usize;
-                                                let entry = tool_call_accum
-                                                    .entry(index)
-                                                    .or_insert_with(|| {
-                                                        (String::new(), String::new(), String::new())
-                                                    });
-                                                if let Some(id) = tc["id"].as_str() {
-                                                    entry.0 = id.to_string();
-                                                }
-                                                if let Some(name) =
-                                                    tc["function"]["name"].as_str()
-                                                {
-                                                    entry.1 = name.to_string();
-                                                }
-                                                if let Some(args) =
-                                                    tc["function"]["arguments"].as_str()
-                                                {
-                                                    entry.2.push_str(args);
+                                        let event_type = val["type"].as_str().unwrap_or("");
+                                        match event_type {
+                                            "response.output_item.added" => {
+                                                if val["item"]["type"].as_str() == Some("function_call") {
+                                                    let idx = val["output_index"].as_u64().unwrap_or(0) as usize;
+                                                    let call_id = val["item"]["call_id"].as_str().unwrap_or("").to_string();
+                                                    let name = val["item"]["name"].as_str().unwrap_or("").to_string();
+                                                    tool_call_accum.insert(idx, (call_id, name, String::new()));
                                                 }
                                             }
-                                        }
-
-                                        // Model finished — decide what to emit
-                                        match finish_reason {
-                                            Some("tool_calls") => {
-                                                // Emit one ToolCall event per call (sorted by index)
-                                                let mut calls: Vec<_> =
-                                                    tool_call_accum.drain().collect();
-                                                calls.sort_by_key(|(idx, _)| *idx);
-                                                for (_, (id, name, arguments)) in calls {
-                                                    let _ = tx.send(AgentEvent::ToolCall {
-                                                        id,
-                                                        name,
-                                                        arguments,
-                                                    });
+                                            "response.output_text.delta" => {
+                                                if let Some(delta) = val["delta"].as_str() {
+                                                    if !delta.is_empty() {
+                                                        let _ = tx.send(AgentEvent::Token(delta.to_string()));
+                                                    }
                                                 }
+                                            }
+                                            "response.function_call_arguments.delta" => {
+                                                let idx = val["output_index"].as_u64().unwrap_or(0) as usize;
+                                                if let Some(delta) = val["delta"].as_str() {
+                                                    if let Some(entry) = tool_call_accum.get_mut(&idx) {
+                                                        entry.2.push_str(delta);
+                                                    }
+                                                }
+                                            }
+                                            "response.output_item.done" => {
+                                                if val["item"]["type"].as_str() == Some("function_call") {
+                                                    let idx = val["output_index"].as_u64().unwrap_or(0) as usize;
+                                                    let call_id = val["item"]["call_id"].as_str().unwrap_or("").to_string();
+                                                    let name = val["item"]["name"].as_str().unwrap_or("").to_string();
+                                                    // Use item's complete arguments (authoritative)
+                                                    let arguments = val["item"]["arguments"].as_str().unwrap_or("").to_string();
+                                                    // Update or insert the complete data
+                                                    tool_call_accum.insert(idx, (call_id, name, arguments));
+                                                    // Emit the tool call now
+                                                    if let Some((id, fn_name, args)) = tool_call_accum.remove(&idx) {
+                                                        let _ = tx.send(AgentEvent::ToolCall {
+                                                            id,
+                                                            name: fn_name,
+                                                            arguments: args,
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            "response.completed" => {
                                                 let _ = tx.send(AgentEvent::Done);
-                                                return;
+                                                break 'outer;
                                             }
-                                            Some("stop") => {
-                                                let _ = tx.send(AgentEvent::Done);
-                                                return;
+                                            "response.failed" => {
+                                                let err = val["response"]["error"]["message"]
+                                                    .as_str()
+                                                    .unwrap_or("unknown error")
+                                                    .to_string();
+                                                let _ = tx.send(AgentEvent::Error(err));
+                                                break 'outer;
                                             }
                                             _ => {}
                                         }
@@ -389,7 +366,7 @@ impl Provider for CerebrasProvider {
                     }
                 }
 
-                // Stream ended without an explicit finish_reason
+                // Stream ended
                 let _ = tx.send(AgentEvent::Done);
             });
         });

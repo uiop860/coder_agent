@@ -14,7 +14,6 @@ use common::{MockProvider, collect_events, init_v8, tool_call_event};
 /// never unexpectedly enriched.
 fn cfg() -> RequestConfig {
     RequestConfig {
-        reasoning_format: None,
         reasoning_effort: None,
         system_prompt: None,
         ..RequestConfig::default()

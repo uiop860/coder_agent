@@ -14,7 +14,7 @@
         ]
       },
       "env": {
-        "CEREBRAS_API_KEY": "csk-rcnxdrprk5kj4y86wtx4f68krkyjdjvmpjkerjxxcd9rv4mv"
+        "OPENROUTER_API_KEY": "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"
       },
       "args": [],
       "cwd": "${workspaceFolder}",
