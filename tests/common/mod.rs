@@ -1,22 +1,8 @@
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use coder_agent::client::{AgentEvent, ChatMessage, Provider, RequestConfig};
-
-// ── V8 one-time initialisation ────────────────────────────────────────────────
-
-static V8_INIT: OnceLock<()> = OnceLock::new();
-
-/// Call this at the top of every test that creates a `JsExecutorHandle`.
-/// Safe to call from multiple threads; V8 is initialised exactly once.
-pub fn init_v8() {
-    V8_INIT.get_or_init(|| {
-        let platform = v8::new_unprotected_default_platform(0, false).make_shared();
-        v8::V8::initialize_platform(platform);
-        v8::V8::initialize();
-    });
-}
 
 // ── Mock LLM provider ─────────────────────────────────────────────────────────
 
@@ -59,16 +45,6 @@ impl Provider for MockProvider {
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
-
-/// Build a `run_typescript` tool-call event as the mock LLM would emit.
-/// `call_id` should be unique per test to match the tool-result reply.
-pub fn tool_call_event(call_id: &str, ts_code: &str) -> AgentEvent {
-    AgentEvent::ToolCall {
-        id: call_id.to_string(),
-        name: "run_typescript".to_string(),
-        arguments: serde_json::json!({ "code": ts_code }).to_string(),
-    }
-}
 
 /// Drain a `agent_stream` receiver into a `Vec`, stopping after `Done` or
 /// `Error`, or when the channel closes (agent thread exited).

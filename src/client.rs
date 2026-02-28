@@ -11,18 +11,6 @@ pub enum AgentEvent {
     ReasoningToken(String),
     Done,
     Error(String),
-    /// The model issued a function tool call (emitted by the provider, consumed by the agent loop)
-    ToolCall {
-        id: String,
-        name: String,
-        arguments: String,
-    },
-    /// Emitted when a code block is about to be executed
-    ScriptStarting,
-    /// The return value from the executed script
-    ScriptOutput(String),
-    /// A JS/TS error from the executed script
-    ScriptError(String),
 }
 
 // ── Shared message / config types ─────────────────────────────────────────────
@@ -112,19 +100,7 @@ impl Default for RequestConfig {
             temperature: None,
             max_tokens: None,
             system_prompt: Some(
-                "You are a code agent. You can execute TypeScript code to accomplish tasks.\n\
-                 \n\
-                 When you need to run code, use the `run_typescript` tool. Pass the TypeScript \
-                 source as the `code` argument. The runtime will execute it and return the result.\n\
-                 \n\
-                 Available host functions inside the TypeScript runtime:\n\
-                 - readFile(path: string): string — read a file from disk\n\
-                 - writeFile(path: string, content: string): void — write a file to disk\n\
-                 - print(...args: any[]): void — print to stderr for debugging\n\
-                 \n\
-                 The last expression (or a top-level `return` statement) becomes the return value.\n\
-                 When you are done and have the final answer, respond with plain text (no tool call)."
-                    .to_string(),
+                "You are a helpful assistant.".to_string(),
             ),
             reasoning_effort: None,
         }
@@ -218,21 +194,7 @@ impl Provider for OpenRouterProvider {
                 }
 
                 // ── Tool definition (flat Responses API format) ───────────
-                let tools = json!([{
-                    "type": "function",
-                    "name": "run_typescript",
-                    "description": "Execute TypeScript code and return the result as a string.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "code": {
-                                "type": "string",
-                                "description": "TypeScript source code to execute. A top-level `return` statement sets the return value."
-                            }
-                        },
-                        "required": ["code"]
-                    }
-                }]);
+                let tools = json!([]);
 
                 // ── Build request body ────────────────────────────────────
                 let mut body = json!({
@@ -279,10 +241,6 @@ impl Provider for OpenRouterProvider {
                 }
 
                 // ── Parse Responses API SSE stream ────────────────────────
-                // Keyed by output_index: (call_id, name, accumulated_arguments)
-                let mut tool_call_accum: std::collections::HashMap<usize, (String, String, String)> =
-                    std::collections::HashMap::new();
-
                 let mut byte_stream = response.bytes_stream();
                 let mut buffer = String::new();
 
@@ -303,45 +261,10 @@ impl Provider for OpenRouterProvider {
                                     if let Ok(val) = serde_json::from_str::<Value>(data) {
                                         let event_type = val["type"].as_str().unwrap_or("");
                                         match event_type {
-                                            "response.output_item.added" => {
-                                                if val["item"]["type"].as_str() == Some("function_call") {
-                                                    let idx = val["output_index"].as_u64().unwrap_or(0) as usize;
-                                                    let call_id = val["item"]["call_id"].as_str().unwrap_or("").to_string();
-                                                    let name = val["item"]["name"].as_str().unwrap_or("").to_string();
-                                                    tool_call_accum.insert(idx, (call_id, name, String::new()));
-                                                }
-                                            }
                                             "response.output_text.delta" => {
                                                 if let Some(delta) = val["delta"].as_str() {
                                                     if !delta.is_empty() {
                                                         let _ = tx.send(AgentEvent::Token(delta.to_string()));
-                                                    }
-                                                }
-                                            }
-                                            "response.function_call_arguments.delta" => {
-                                                let idx = val["output_index"].as_u64().unwrap_or(0) as usize;
-                                                if let Some(delta) = val["delta"].as_str() {
-                                                    if let Some(entry) = tool_call_accum.get_mut(&idx) {
-                                                        entry.2.push_str(delta);
-                                                    }
-                                                }
-                                            }
-                                            "response.output_item.done" => {
-                                                if val["item"]["type"].as_str() == Some("function_call") {
-                                                    let idx = val["output_index"].as_u64().unwrap_or(0) as usize;
-                                                    let call_id = val["item"]["call_id"].as_str().unwrap_or("").to_string();
-                                                    let name = val["item"]["name"].as_str().unwrap_or("").to_string();
-                                                    // Use item's complete arguments (authoritative)
-                                                    let arguments = val["item"]["arguments"].as_str().unwrap_or("").to_string();
-                                                    // Update or insert the complete data
-                                                    tool_call_accum.insert(idx, (call_id, name, arguments));
-                                                    // Emit the tool call now
-                                                    if let Some((id, fn_name, args)) = tool_call_accum.remove(&idx) {
-                                                        let _ = tx.send(AgentEvent::ToolCall {
-                                                            id,
-                                                            name: fn_name,
-                                                            arguments: args,
-                                                        });
                                                     }
                                                 }
                                             }

@@ -4,8 +4,7 @@ use std::{
 };
 
 use coder_agent::agent::agent_stream;
-use coder_agent::client::{AgentEvent, OpenRouterProvider, ChatMessage, Provider, RequestConfig};
-use coder_agent::executor::JsExecutorHandle;
+use coder_agent::client::{AgentEvent, ChatMessage, OpenRouterProvider, Provider, RequestConfig};
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -51,7 +50,6 @@ struct App {
     rx: Option<Receiver<AgentEvent>>,
     streaming: bool,
     provider: Option<Arc<dyn Provider>>,
-    executor: Option<JsExecutorHandle>,
     config: RequestConfig,
     /// When true we render the arguments payload attached to any tool-call
     /// messages.  Toggled by the user pressing 't'.
@@ -64,9 +62,9 @@ struct App {
 }
 
 impl App {
-    fn new(provider: Option<Arc<dyn Provider>>, executor: Option<JsExecutorHandle>) -> Self {
+    fn new(provider: Option<Arc<dyn Provider>>) -> Self {
         let welcome = if provider.is_some() {
-            "Hello! I'm your code agent. I can write and execute TypeScript for you.\n(press Ctrl+T to toggle tool-call details, Ctrl+R to toggle reasoning, Ctrl+D to hide/show system messages)".to_string()
+            "Hello! I'm a helpful assistant.\n(press Ctrl+R to toggle reasoning, Ctrl+D to hide/show system messages)".to_string()
         } else {
             "⚠ No OPENROUTER_API_KEY found. Set it and restart.".to_string()
         };
@@ -86,7 +84,6 @@ impl App {
             rx: None,
             streaming: false,
             provider,
-            executor,
             config: RequestConfig::default(),
             show_tool_call_details: false,
             show_reasoning: false,
@@ -113,10 +110,9 @@ impl App {
             tool_call: None,
         });
 
-        if let (Some(provider), Some(executor)) = (self.provider.clone(), self.executor.clone()) {
+        if let Some(provider) = self.provider.clone() {
             self.rx = Some(agent_stream(
                 provider,
-                executor,
                 self.history.clone(),
                 self.config.clone(),
             ));
@@ -167,67 +163,6 @@ impl App {
                     self.rx = None;
                     self.streaming = false;
                     break;
-                }
-                Ok(AgentEvent::ScriptStarting) => {
-                    self.messages.push(Message {
-                        sender: Sender::System,
-                        content: "⚙ Executing script…".to_string(),
-                        reasoning: String::new(),
-                        tool_call: None,
-                    });
-                    self.scroll_to_bottom();
-                }
-                Ok(AgentEvent::ScriptOutput(output)) => {
-                    self.messages.push(Message {
-                        sender: Sender::System,
-                        content: format!("✓ Script output: {}", output),
-                        reasoning: String::new(),
-                        tool_call: None,
-                    });
-                    // Add a new placeholder for the next LLM response
-                    self.messages.push(Message {
-                        sender: Sender::Agent,
-                        content: String::new(),
-                        reasoning: String::new(),
-                        tool_call: None,
-                    });
-                    self.scroll_to_bottom();
-                }
-                Ok(AgentEvent::ScriptError(err)) => {
-                    self.messages.push(Message {
-                        sender: Sender::System,
-                        content: format!("✗ Script error: {}", err),
-                        reasoning: String::new(),
-                        tool_call: None,
-                    });
-                    // Add a new placeholder for the next LLM response
-                    self.messages.push(Message {
-                        sender: Sender::Agent,
-                        content: String::new(),
-                        reasoning: String::new(),
-                        tool_call: None,
-                    });
-                    self.scroll_to_bottom();
-                }
-                Ok(AgentEvent::ToolCall {
-                    id,
-                    name,
-                    arguments,
-                }) => {
-                    // Show a system message for the incoming tool call; the
-                    // agent loop will also see it separately.
-                    let info = coder_agent::client::ToolCallInfo {
-                        id,
-                        name,
-                        arguments,
-                    };
-                    self.messages.push(Message {
-                        sender: Sender::System,
-                        content: String::new(),
-                        reasoning: String::new(),
-                        tool_call: Some(info),
-                    });
-                    self.scroll_to_bottom();
                 }
                 Err(_) => break, // no more events right now
             }
@@ -297,24 +232,17 @@ impl App {
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
-    // Initialize V8 platform (must happen before any isolate is created)
-    let platform = v8::new_unprotected_default_platform(0, false).make_shared();
-    v8::V8::initialize_platform(platform);
-    v8::V8::initialize();
-
     let provider = OpenRouterProvider::from_env().map(|p| Arc::new(p) as Arc<dyn Provider>);
-    let executor = Some(JsExecutorHandle::spawn());
 
-    ratatui::run(|terminal| app(terminal, provider, executor))?;
+    ratatui::run(|terminal| app(terminal, provider))?;
     Ok(())
 }
 
 fn app(
     terminal: &mut DefaultTerminal,
     provider: Option<Arc<dyn Provider>>,
-    executor: Option<JsExecutorHandle>,
 ) -> io::Result<()> {
-    let mut app = App::new(provider, executor);
+    let mut app = App::new(provider);
     // hint about toggle
     if app.provider.is_some() {
         app.messages.push(Message {
@@ -550,7 +478,7 @@ mod tests {
         // filtering logic is exercised.
         let backend = TestBackend::new(10, 5);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        let mut app = App::new(None, None);
+        let mut app = App::new(None);
         app.messages.push(Message {
             sender: Sender::System,
             content: "debug".into(),
