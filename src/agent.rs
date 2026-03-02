@@ -118,9 +118,8 @@ pub fn agent_stream(
                         format!("Unknown tool: {}", tc.name)
                     });
 
-                debug!("agent_stream: tool '{}' result ({} chars): {}",
-                    tc.name, result.len(),
-                    if result.len() > 200 { format!("{}…", &result[..200]) } else { result.clone() });
+                debug!("agent_stream: tool '{}' result ({} chars):\n{}",
+                    tc.name, result.len(), result);
 
                 let _ = tx.send(AgentEvent::ToolCallResult {
                     info: tc.clone(),

@@ -24,7 +24,9 @@ pub enum ChatRole {
     User,
     Assistant,
     /// A tool result message — carries the id of the tool call it responds to.
-    Tool { tool_call_id: String },
+    Tool {
+        tool_call_id: String,
+    },
 }
 
 /// A single tool call made by the assistant (stored inside an assistant message).
@@ -117,13 +119,20 @@ pub trait Provider: Send + Sync {
 pub struct OpenRouterProvider {
     api_key: String,
     base_url: String,
+    client: reqwest::Client,
 }
 
 impl OpenRouterProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
+        let client = reqwest::Client::builder()
+            .pool_max_idle_per_host(10)
+            .build()
+            .expect("failed to build reqwest client");
+
         Self {
             api_key: api_key.into(),
             base_url: "https://openrouter.ai/api/v1".to_string(),
+            client,
         }
     }
 
@@ -138,6 +147,7 @@ impl Provider for OpenRouterProvider {
         let api_key = self.api_key.clone();
         let base_url = self.base_url.clone();
         let config = config.clone();
+        let client = self.client.clone();
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -227,7 +237,6 @@ impl Provider for OpenRouterProvider {
                     body["reasoning"] = json!({ "effort": effort });
                 }
 
-                let client = reqwest::Client::new();
                 let resp = client
                     .post(format!("{}/responses", base_url))
                     .header("Authorization", format!("Bearer {}", api_key))
@@ -261,6 +270,10 @@ impl Provider for OpenRouterProvider {
                 let mut byte_stream = response.bytes_stream();
                 let mut buffer = String::new();
                 let mut tool_call_accum: std::collections::HashMap<usize, (String, String, String)> =
+                    std::collections::HashMap::new();
+                // Raw delta accumulation by output-item index — populated even when
+                // output_item.added never fires (e.g. Nvidia via OpenRouter).
+                let mut raw_args_accum: std::collections::HashMap<usize, String> =
                     std::collections::HashMap::new();
 
                 'outer: while let Some(chunk) = byte_stream.next().await {
@@ -317,7 +330,9 @@ impl Provider for OpenRouterProvider {
                                                 if let (Some(idx), Some(delta)) =
                                                     (val["index"].as_u64(), val["delta"].as_str())
                                                 {
-                                                    if let Some(entry) = tool_call_accum.get_mut(&(idx as usize)) {
+                                                    let i = idx as usize;
+                                                    raw_args_accum.entry(i).or_default().push_str(delta);
+                                                    if let Some(entry) = tool_call_accum.get_mut(&i) {
                                                         entry.2.push_str(delta);
                                                     }
                                                 }
@@ -349,13 +364,14 @@ impl Provider for OpenRouterProvider {
                                             }
                                             "response.completed" => {
                                                 info!("sse: response.completed");
+                                                debug!("sse: full response — {}", serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string()));
                                                 // Extract any function_call items from the
                                                 // completed response output.  OpenRouter does
                                                 // not emit output_item.added / output_item.done
                                                 // for tool calls, so this is the only reliable
                                                 // place to capture them.
                                                 if let Some(output) = val["response"]["output"].as_array() {
-                                                    for item in output {
+                                                    for (item_idx, item) in output.iter().enumerate() {
                                                         if item["type"].as_str() == Some("function_call") {
                                                             let call_id = item["call_id"]
                                                                 .as_str()
@@ -365,10 +381,18 @@ impl Provider for OpenRouterProvider {
                                                                 .as_str()
                                                                 .unwrap_or("")
                                                                 .to_string();
-                                                            let arguments = item["arguments"]
-                                                                .as_str()
-                                                                .unwrap_or("{}")
-                                                                .to_string();
+                                                            // Prefer streamed deltas — the `arguments`
+                                                            // field in `response.completed` can be
+                                                            // truncated by some providers.
+                                                            let arguments = raw_args_accum
+                                                                .remove(&item_idx)
+                                                                .filter(|s| !s.is_empty())
+                                                                .or_else(|| {
+                                                                    item["arguments"]
+                                                                        .as_str()
+                                                                        .map(|s| s.to_string())
+                                                                })
+                                                                .unwrap_or_else(|| "{}".to_string());
                                                             info!("sse: tool call from completed — name={} call_id={} args={}",
                                                                 name, call_id, arguments);
                                                             let _ = tx.send(AgentEvent::ToolCall(ToolCallInfo {

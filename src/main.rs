@@ -19,6 +19,66 @@ use ratatui::{
     },
 };
 use simplelog::{Config, LevelFilter, WriteLogger};
+use unicode_width::UnicodeWidthStr;
+
+// ── Input cursor helpers ────────────────────────────────────────────────────
+
+/// Move one Unicode scalar value to the left, returning the new byte index.
+fn cursor_prev_char(s: &str, pos: usize) -> usize {
+    if pos == 0 {
+        return 0;
+    }
+    let mut i = pos - 1;
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Move one Unicode scalar value to the right, returning the new byte index.
+fn cursor_next_char(s: &str, pos: usize) -> usize {
+    if pos >= s.len() {
+        return s.len();
+    }
+    let mut i = pos + 1;
+    while !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+/// Jump one word to the left (bash/readline style): skip whitespace then
+/// non-whitespace going backwards.
+fn cursor_prev_word(s: &str, pos: usize) -> usize {
+    let bytes = s.as_bytes();
+    let mut i = pos;
+    // skip trailing spaces
+    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    // skip word chars
+    while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    i
+}
+
+/// Jump one word to the right (bash/readline style): skip non-whitespace then
+/// whitespace going forward.
+fn cursor_next_word(s: &str, pos: usize) -> usize {
+    let bytes = s.as_bytes();
+    let len = s.len();
+    let mut i = pos;
+    // skip word chars
+    while i < len && !bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    // skip trailing spaces
+    while i < len && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i
+}
 
 struct SlashCommand {
     name: &'static str,
@@ -105,6 +165,8 @@ struct App {
     // Full conversation history sent to the API
     history: Vec<ChatMessage>,
     input_buffer: String,
+    /// Byte index of the edit cursor within `input_buffer`.
+    cursor_pos: usize,
     scroll_offset: usize,
     max_scroll: usize,
     scroll_up_held: bool,
@@ -149,6 +211,7 @@ impl App {
             }],
             history: Vec::new(),
             input_buffer: String::new(),
+            cursor_pos: 0,
             scroll_offset: 0,
             max_scroll: 0,
             scroll_up_held: false,
@@ -248,15 +311,15 @@ impl App {
                     });
                     self.scroll_to_bottom();
                 }
-                Ok(AgentEvent::ToolCallResult {
-                    info,
-                    output,
-                }) => {
+                Ok(AgentEvent::ToolCallResult { info, output }) => {
                     // Merge result into the existing ToolCall message (same invocation).
                     // Walk back to find the matching Tool message for this call id.
                     let merged = self.messages.iter_mut().rev().find(|m| {
                         matches!(m.sender, Sender::Tool)
-                            && m.tool_call.as_ref().map(|tc| tc.id == info.id).unwrap_or(false)
+                            && m.tool_call
+                                .as_ref()
+                                .map(|tc| tc.id == info.id)
+                                .unwrap_or(false)
                     });
                     if let Some(msg) = merged {
                         msg.content = output;
@@ -328,8 +391,7 @@ impl App {
                     self.slash_selected = self.slash_selected.saturating_sub(1);
                 }
                 KeyCode::Down => {
-                    self.slash_selected =
-                        (self.slash_selected + 1).min(MODELS.len() - 1);
+                    self.slash_selected = (self.slash_selected + 1).min(MODELS.len() - 1);
                 }
                 KeyCode::Enter => {
                     self.config.model = MODELS[self.slash_selected].id.to_string();
@@ -337,12 +399,14 @@ impl App {
                     self.slash_mode = false;
                     self.slash_selected = 0;
                     self.input_buffer.clear();
+                    self.cursor_pos = 0;
                 }
                 KeyCode::Esc => {
                     self.slash_model_mode = false;
                     self.slash_mode = false;
                     self.slash_selected = 0;
                     self.input_buffer.clear();
+                    self.cursor_pos = 0;
                 }
                 _ => {}
             }
@@ -358,12 +422,12 @@ impl App {
                 }
                 KeyCode::Down => {
                     if !filtered.is_empty() {
-                        self.slash_selected =
-                            (self.slash_selected + 1).min(filtered.len() - 1);
+                        self.slash_selected = (self.slash_selected + 1).min(filtered.len() - 1);
                     }
                 }
                 KeyCode::Esc => {
                     self.input_buffer.clear();
+                    self.cursor_pos = 0;
                     self.slash_mode = false;
                     self.slash_selected = 0;
                 }
@@ -373,25 +437,26 @@ impl App {
                         if cmd == "/model" {
                             // Open model picker sub-menu; pre-select current model
                             let current = self.config.model.as_str();
-                            self.slash_selected = MODELS
-                                .iter()
-                                .position(|m| m.id == current)
-                                .unwrap_or(0);
+                            self.slash_selected =
+                                MODELS.iter().position(|m| m.id == current).unwrap_or(0);
                             self.slash_model_mode = true;
                         } else {
                             self.execute_slash_command(cmd);
                             self.input_buffer.clear();
+                            self.cursor_pos = 0;
                             self.slash_mode = false;
                             self.slash_selected = 0;
                         }
                     } else {
                         self.input_buffer.clear();
+                        self.cursor_pos = 0;
                         self.slash_mode = false;
                         self.slash_selected = 0;
                     }
                 }
                 KeyCode::Backspace => {
                     self.input_buffer.pop();
+                    self.cursor_pos = self.input_buffer.len();
                     if self.input_buffer.is_empty() {
                         self.slash_mode = false;
                     }
@@ -399,6 +464,7 @@ impl App {
                 }
                 KeyCode::Char(c) => {
                     self.input_buffer.push(c);
+                    self.cursor_pos = self.input_buffer.len();
                     self.slash_selected = 0;
                 }
                 _ => {}
@@ -413,9 +479,11 @@ impl App {
             (KeyCode::Enter, _) => {
                 if !self.input_buffer.is_empty() && !self.streaming {
                     let user_input = self.input_buffer.drain(..).collect();
+                    self.cursor_pos = 0;
                     self.send_message(user_input);
                 }
             }
+            // ── Scroll ──────────────────────────────────────────────────────
             (KeyCode::Up, _) => {
                 self.scroll_up_held = true;
                 self.scroll_offset = self.scroll_offset.saturating_add(1).min(self.max_scroll);
@@ -424,15 +492,57 @@ impl App {
                 self.scroll_down_held = true;
                 self.scroll_offset = self.scroll_offset.saturating_sub(1);
             }
-            (KeyCode::Backspace, _) => {
-                self.input_buffer.pop();
+            // ── Cursor movement ─────────────────────────────────────────────
+            (KeyCode::Left, KeyModifiers::CONTROL) => {
+                self.cursor_pos = cursor_prev_word(&self.input_buffer, self.cursor_pos);
             }
+            (KeyCode::Right, KeyModifiers::CONTROL) => {
+                self.cursor_pos = cursor_next_word(&self.input_buffer, self.cursor_pos);
+            }
+            (KeyCode::Left, _) => {
+                self.cursor_pos = cursor_prev_char(&self.input_buffer, self.cursor_pos);
+            }
+            (KeyCode::Right, _) => {
+                self.cursor_pos = cursor_next_char(&self.input_buffer, self.cursor_pos);
+            }
+            (KeyCode::Home, _) => {
+                self.cursor_pos = 0;
+            }
+            (KeyCode::End, _) => {
+                self.cursor_pos = self.input_buffer.len();
+            }
+            // ── Deletion ────────────────────────────────────────────────────
+            (KeyCode::Backspace, KeyModifiers::CONTROL) => {
+                // Delete from previous word boundary up to cursor
+                let start = cursor_prev_word(&self.input_buffer, self.cursor_pos);
+                self.input_buffer.drain(start..self.cursor_pos);
+                self.cursor_pos = start;
+            }
+            (KeyCode::Backspace, _) => {
+                if self.cursor_pos > 0 {
+                    let prev = cursor_prev_char(&self.input_buffer, self.cursor_pos);
+                    self.input_buffer.remove(prev);
+                    self.cursor_pos = prev;
+                }
+            }
+            (KeyCode::Delete, KeyModifiers::CONTROL) => {
+                // Delete from cursor to next word boundary
+                let end = cursor_next_word(&self.input_buffer, self.cursor_pos);
+                self.input_buffer.drain(self.cursor_pos..end);
+            }
+            (KeyCode::Delete, _) => {
+                if self.cursor_pos < self.input_buffer.len() {
+                    self.input_buffer.remove(self.cursor_pos);
+                }
+            }
+            // ── Typing ──────────────────────────────────────────────────────
             (KeyCode::Char(c), _) => {
                 if c == '/' && self.input_buffer.is_empty() {
                     self.slash_mode = true;
                     self.slash_selected = 0;
                 }
-                self.input_buffer.push(c);
+                self.input_buffer.insert(self.cursor_pos, c);
+                self.cursor_pos += c.len_utf8();
             }
             _ => {}
         }
@@ -626,7 +736,7 @@ fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App
             let text_width = inner_width.saturating_sub(2).max(1);
 
             let content_lines: Vec<Line<'static>> = if matches!(msg.sender, Sender::Agent) {
-                coder_agent::markdown::render_markdown(&display_content, text_width, dot_style)
+                coder_agent::markdown::render_markdown(&display_content, text_width)
             } else {
                 render_plain_text(&display_content, text_width, dot_style)
             };
@@ -668,7 +778,10 @@ fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App
             .end_symbol(Some("↓"));
         frame.render_stateful_widget(
             scrollbar,
-            area.inner(Margin { vertical: 1, horizontal: 0 }),
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
             &mut scrollbar_state,
         );
     }
@@ -702,10 +815,18 @@ fn render_slash_popover(frame: &mut Frame, input_area: Rect, app: &App) {
             let cmd = &SLASH_COMMANDS[cmd_idx];
             let state_label = match cmd.name {
                 "/reasoning" => {
-                    if app.show_reasoning { "[on]" } else { "[off]" }
+                    if app.show_reasoning {
+                        "[on]"
+                    } else {
+                        "[off]"
+                    }
                 }
                 "/tools" => {
-                    if app.show_tools { "[on]" } else { "[off]" }
+                    if app.show_tools {
+                        "[on]"
+                    } else {
+                        "[off]"
+                    }
                 }
                 "/model" => &app.config.model,
                 _ => "",
@@ -719,8 +840,7 @@ fn render_slash_popover(frame: &mut Frame, input_area: Rect, app: &App) {
         })
         .collect();
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Settings"));
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Settings"));
 
     frame.render_widget(list, popup_area);
 }
@@ -753,8 +873,11 @@ fn render_model_picker(frame: &mut Frame, input_area: Rect, app: &App) {
         })
         .collect();
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Choose model  (Enter to select · Esc to cancel)"));
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Choose model  (Enter to select · Esc to cancel)"),
+    );
 
     frame.render_widget(list, popup_area);
 }
@@ -778,9 +901,13 @@ fn render_input(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
 
     frame.render_widget(input_widget, area);
 
-    // Set cursor position in the input area
+    // Set cursor position in the input area.
+    // Use display width of the text before the cursor for correct Unicode alignment.
     if area.height > 0 {
-        let cursor_x = (app.input_buffer.len() as u16) + 3; // +3 for "> " prefix
+        let before_cursor = &app.input_buffer[..app.cursor_pos];
+        let display_width = UnicodeWidthStr::width(before_cursor) as u16;
+        // area.x + 1 (left border) + 2 ("> ") + display_width
+        let cursor_x = area.x + 1 + 2 + display_width;
         let cursor_y = area.y + 1;
         if cursor_x < area.right() && cursor_y < area.bottom() {
             frame.set_cursor_position(Position::new(cursor_x.min(area.right() - 1), cursor_y));

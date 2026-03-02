@@ -3,6 +3,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Copy, Debug)]
 enum StyleModifier {
@@ -29,14 +30,13 @@ struct MdRenderer {
     heading_level: Option<HeadingLevel>,
     first_line_emitted: bool,
     text_width: usize,
-    dot_style: Style,
     // Table state
     table_rows: Vec<(bool, Vec<Vec<(String, Style)>>)>, // (is_header, cells)
     table_current_cells: Vec<Vec<(String, Style)>>,
 }
 
 impl MdRenderer {
-    fn new(text_width: usize, dot_style: Style) -> Self {
+    fn new(text_width: usize) -> Self {
         Self {
             output: Vec::new(),
             inline_buf: Vec::new(),
@@ -47,7 +47,6 @@ impl MdRenderer {
             heading_level: None,
             first_line_emitted: false,
             text_width,
-            dot_style,
             table_rows: Vec::new(),
             table_current_cells: Vec::new(),
         }
@@ -77,7 +76,7 @@ impl MdRenderer {
             PrefixKind::Normal => {
                 if !self.first_line_emitted {
                     self.first_line_emitted = true;
-                    Span::styled("● ", self.dot_style)
+                    Span::styled("● ", Style::default().fg(Color::White))
                 } else {
                     Span::raw("  ")
                 }
@@ -91,9 +90,7 @@ impl MdRenderer {
                     Span::raw(indent)
                 }
             }
-            PrefixKind::Blockquote => {
-                Span::styled("│ ", Style::default().fg(Color::Gray))
-            }
+            PrefixKind::Blockquote => Span::styled("│ ", Style::default().fg(Color::Gray)),
         }
     }
 
@@ -112,8 +109,8 @@ impl MdRenderer {
             .collect();
 
         let wrapped = wrap_spans(&spans, self.text_width);
-        let is_first_bullet = matches!(prefix_kind, PrefixKind::Bullet)
-            && !self.list_item_first_flushed;
+        let is_first_bullet =
+            matches!(prefix_kind, PrefixKind::Bullet) && !self.list_item_first_flushed;
 
         for (idx, line_spans) in wrapped.into_iter().enumerate() {
             let prefix = self.next_prefix(prefix_kind, idx == 0 && is_first_bullet);
@@ -134,7 +131,7 @@ impl MdRenderer {
         let truncated = truncate_to_cols(line, max_code_width);
         let prefix = if !self.first_line_emitted {
             self.first_line_emitted = true;
-            Span::styled("● ", self.dot_style)
+            Span::styled("● ", Style::default().fg(Color::White))
         } else {
             Span::raw("  ")
         };
@@ -149,18 +146,23 @@ impl MdRenderer {
             return;
         }
 
-        let n_cols = self.table_rows.iter().map(|(_, c)| c.len()).max().unwrap_or(0);
+        let n_cols = self
+            .table_rows
+            .iter()
+            .map(|(_, c)| c.len())
+            .max()
+            .unwrap_or(0);
         if n_cols == 0 {
             self.table_rows.clear();
             return;
         }
 
-        // Natural column widths (max content chars across all rows)
+        // Natural column widths (max content display cols across all rows)
         let mut col_widths: Vec<usize> = vec![0; n_cols];
         for (_, cells) in &self.table_rows {
             for (i, cell) in cells.iter().enumerate() {
                 if i < n_cols {
-                    let w: usize = cell.iter().map(|(s, _)| s.chars().count()).sum();
+                    let w: usize = cell.iter().map(|(s, _)| s.width()).sum();
                     col_widths[i] = col_widths[i].max(w);
                 }
             }
@@ -185,7 +187,7 @@ impl MdRenderer {
             // Content row
             let prefix = if !self.first_line_emitted {
                 self.first_line_emitted = true;
-                Span::styled("● ", self.dot_style)
+                Span::styled("● ", Style::default().fg(Color::White))
             } else {
                 Span::raw("  ")
             };
@@ -194,16 +196,20 @@ impl MdRenderer {
             for (col_idx, &col_w) in col_widths.iter().enumerate() {
                 let empty = vec![];
                 let cell_spans = cells.get(col_idx).unwrap_or(&empty);
-                let cell_len: usize = cell_spans.iter().map(|(s, _)| s.chars().count()).sum();
+                let cell_len: usize = cell_spans.iter().map(|(s, _)| s.width()).sum();
 
                 let mut remaining = col_w;
                 for (text, style) in cell_spans {
                     if remaining == 0 {
                         break;
                     }
-                    let take = text.chars().count().min(remaining);
+                    let take = text.width().min(remaining);
                     let t = truncate_to_cols(text, take);
-                    let s = if is_header { merge_styles(*style, header_base) } else { *style };
+                    let s = if is_header {
+                        merge_styles(*style, header_base)
+                    } else {
+                        *style
+                    };
                     span_vec.push(Span::styled(t, s));
                     remaining = remaining.saturating_sub(take);
                 }
@@ -420,7 +426,7 @@ fn wrap_spans(spans: &[(String, Style)], width: usize) -> Vec<Vec<(String, Style
         }
 
         for token in tokens {
-            let token_len = token.chars().count();
+            let token_len = token.width();
 
             if token == " " {
                 if current_col > 0 && current_col < width {
@@ -451,21 +457,26 @@ fn wrap_spans(spans: &[(String, Style)], width: usize) -> Vec<Vec<(String, Style
     lines
 }
 
-fn truncate_to_cols(s: &str, max: usize) -> String {
-    match s.char_indices().nth(max) {
-        Some((byte_idx, _)) => s[..byte_idx].to_string(),
-        None => s.to_string(),
+fn truncate_to_cols(s: &str, max_cols: usize) -> String {
+    let mut width = 0;
+    for (byte_idx, ch) in s.char_indices() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > max_cols {
+            return s[..byte_idx].to_string();
+        }
+        width += ch_width;
     }
+    s.to_string()
 }
 
-pub fn render_markdown(content: &str, text_width: usize, dot_style: Style) -> Vec<Line<'static>> {
+pub fn render_markdown(content: &str, text_width: usize) -> Vec<Line<'static>> {
     if content.is_empty() {
         return vec![];
     }
 
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
     let parser = TextMergeStream::new(Parser::new_ext(content, opts));
-    let mut renderer = MdRenderer::new(text_width, dot_style);
+    let mut renderer = MdRenderer::new(text_width);
 
     for event in parser {
         renderer.process_event(event);
@@ -491,6 +502,7 @@ pub fn render_markdown(content: &str, text_width: usize, dot_style: Style) -> Ve
 mod tests {
     use super::*;
     use ratatui::style::Modifier;
+    use unicode_width::UnicodeWidthStr;
 
     fn plain_text(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -498,15 +510,17 @@ mod tests {
 
     #[test]
     fn plain_text_wraps() {
-        let dot = Style::default().fg(Color::Green);
-        let lines = render_markdown("hello world foo bar baz", 10, dot);
-        assert!(lines.len() >= 2, "expected wrapping, got {} lines", lines.len());
+        let lines = render_markdown("hello world foo bar baz", 10);
+        assert!(
+            lines.len() >= 2,
+            "expected wrapping, got {} lines",
+            lines.len()
+        );
     }
 
     #[test]
     fn bold_applies_modifier() {
-        let dot = Style::default().fg(Color::Green);
-        let lines = render_markdown("**bold**", 80, dot);
+        let lines = render_markdown("**bold**", 80);
         let has_bold = lines.iter().any(|line| {
             line.spans
                 .iter()
@@ -517,8 +531,7 @@ mod tests {
 
     #[test]
     fn italic_applies_modifier() {
-        let dot = Style::default().fg(Color::Green);
-        let lines = render_markdown("*italic*", 80, dot);
+        let lines = render_markdown("*italic*", 80);
         let has_italic = lines.iter().any(|line| {
             line.spans
                 .iter()
@@ -529,8 +542,7 @@ mod tests {
 
     #[test]
     fn inline_code_is_cyan() {
-        let dot = Style::default().fg(Color::Green);
-        let lines = render_markdown("use `code` here", 80, dot);
+        let lines = render_markdown("use `code` here", 80);
         let has_cyan = lines
             .iter()
             .any(|line| line.spans.iter().any(|s| s.style.fg == Some(Color::Cyan)));
@@ -539,35 +551,30 @@ mod tests {
 
     #[test]
     fn code_block_not_wrapped() {
-        let dot = Style::default().fg(Color::Green);
         let content = "```\nshort\n```";
-        let lines = render_markdown(content, 10, dot);
+        let lines = render_markdown(content, 10);
         assert!(!lines.is_empty());
     }
 
     #[test]
     fn empty_input_returns_empty() {
-        let dot = Style::default().fg(Color::Green);
-        let lines = render_markdown("", 80, dot);
+        let lines = render_markdown("", 80);
         assert!(lines.is_empty());
     }
 
     #[test]
     fn horizontal_rule_emits_dashes() {
-        let dot = Style::default().fg(Color::Green);
-        let lines = render_markdown("---\n", 10, dot);
+        let lines = render_markdown("---\n", 10);
         let has_dashes = lines.iter().any(|line| plain_text(line).contains('─'));
         assert!(has_dashes, "expected dashes for horizontal rule");
     }
 
     #[test]
     fn heading_h1_is_bold_cyan() {
-        let dot = Style::default().fg(Color::Green);
-        let lines = render_markdown("# Title\n", 80, dot);
+        let lines = render_markdown("# Title\n", 80);
         let has_bold_cyan = lines.iter().any(|line| {
             line.spans.iter().any(|s| {
-                s.style.fg == Some(Color::Cyan)
-                    && s.style.add_modifier.contains(Modifier::BOLD)
+                s.style.fg == Some(Color::Cyan) && s.style.add_modifier.contains(Modifier::BOLD)
             })
         });
         assert!(has_bold_cyan, "expected bold cyan for H1 heading");
@@ -575,9 +582,8 @@ mod tests {
 
     #[test]
     fn table_renders_with_separator() {
-        let dot = Style::default().fg(Color::Green);
         let md = "| A | B |\n|---|---|\n| x | y |\n";
-        let lines = render_markdown(md, 40, dot);
+        let lines = render_markdown(md, 40);
         // Should have: header row, separator row, data row, blank
         assert!(lines.len() >= 3, "expected at least 3 lines for table");
         let sep_line = lines.iter().any(|l| plain_text(l).contains('─'));
@@ -586,9 +592,8 @@ mod tests {
 
     #[test]
     fn table_header_is_bold() {
-        let dot = Style::default().fg(Color::Green);
         let md = "| Name | Value |\n|------|-------|\n| foo  | bar   |\n";
-        let lines = render_markdown(md, 40, dot);
+        let lines = render_markdown(md, 40);
         // First content row should have a bold span
         let has_bold = lines.iter().any(|line| {
             line.spans
@@ -596,5 +601,39 @@ mod tests {
                 .any(|s| s.style.add_modifier.contains(Modifier::BOLD))
         });
         assert!(has_bold, "expected bold header in table");
+    }
+
+    #[test]
+    fn table_wide_chars_aligned() {
+        // Emoji are 2 terminal columns wide. Every content row should render to
+        // the same display width so that columns are visually aligned.
+        let md = "| Feature    | Support |\n|------------|--------|\n| Tables     | ✅      |\n| Task Lists | ❌      |\n";
+        let lines = render_markdown(md, 60);
+
+        // Collect display widths of all non-empty, non-separator content rows
+        // (skip the blank trailing line and the ─┼─ separator line).
+        let row_widths: Vec<usize> = lines
+            .iter()
+            .filter(|l| {
+                let t = plain_text(l);
+                !t.trim().is_empty() && !t.trim_start().starts_with('─')
+            })
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum::<usize>()
+            })
+            .collect();
+
+        assert!(row_widths.len() >= 3, "expected header + 2 data rows");
+        let first = row_widths[0];
+        for (i, &w) in row_widths.iter().enumerate() {
+            assert_eq!(
+                w, first,
+                "row {} has display width {} but expected {} — emoji misaligned",
+                i, w, first
+            );
+        }
     }
 }

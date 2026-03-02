@@ -41,8 +41,16 @@ impl Tool for ReadFileTool {
             return Err(format!("Path is not a file: {}", path));
         }
 
-        // Read the file
-        fs::read_to_string(file_path)
-            .map_err(|e| format!("Failed to read file '{}': {}", path, e))
+        let content = fs::read_to_string(file_path)
+            .map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+
+        let numbered = content
+            .lines()
+            .enumerate()
+            .map(|(i, line)| format!("{:>4}: {}", i + 1, line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Ok(numbered)
     }
 }

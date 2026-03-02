@@ -23,6 +23,7 @@ pub fn default_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(list_dir::ListDirTool),
         Arc::new(search_file::SearchFileTool),
         Arc::new(current_dir::CurrentDirTool),
+        Arc::new(replace_lines::ReplaceLinesTool),
     ]
 }
 
@@ -31,3 +32,5 @@ pub mod write_file;
 pub mod list_dir;
 pub mod search_file;
 pub mod current_dir;
+pub mod str_replace;
+pub mod replace_lines;
