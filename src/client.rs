@@ -1,16 +1,19 @@
 use std::sync::mpsc::{Receiver, channel};
 
 use futures::StreamExt;
+use log::{debug, error, info};
 use serde_json::{Value, json};
 
 // ── Events emitted to the TUI ─────────────────────────────────────────────────
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AgentEvent {
     Token(String),
     ReasoningToken(String),
     Done,
     Error(String),
+    ToolCall(ToolCallInfo),
+    ToolCallResult { info: ToolCallInfo, output: String },
 }
 
 // ── Shared message / config types ─────────────────────────────────────────────
@@ -41,14 +44,6 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
-    #[allow(dead_code)]
-    pub fn system(content: impl Into<String>) -> Self {
-        Self {
-            role: ChatRole::System,
-            content: content.into(),
-            tool_calls: None,
-        }
-    }
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: ChatRole::User,
@@ -83,7 +78,7 @@ impl ChatMessage {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RequestConfig {
     pub model: String,
     pub temperature: Option<f32>,
@@ -91,6 +86,7 @@ pub struct RequestConfig {
     pub system_prompt: Option<String>,
     /// "low" | "medium" | "high" — only sent if Some
     pub reasoning_effort: Option<String>,
+    pub tools: Vec<std::sync::Arc<dyn crate::tools::Tool>>,
 }
 
 impl Default for RequestConfig {
@@ -100,9 +96,12 @@ impl Default for RequestConfig {
             temperature: None,
             max_tokens: None,
             system_prompt: Some(
-                "You are a helpful assistant.".to_string(),
+                "You are a helpful code agent with access to file system tools. \
+When the user asks you to interact with files or directories, use the available tools to complete the task. \
+After using tools, always provide a clear summary or response about what you found or did.".to_string(),
             ),
             reasoning_effort: None,
+            tools: Vec::new(),
         }
     }
 }
@@ -193,8 +192,22 @@ impl Provider for OpenRouterProvider {
                     }
                 }
 
+                debug!("provider: building request — model={} messages={}",
+                    config.model, messages.len());
+
                 // ── Tool definition (flat Responses API format) ───────────
-                let tools = json!([]);
+                let tools: Vec<Value> = config.tools.iter().map(|t| {
+                    let def = t.definition();
+                    json!({
+                        "type": "function",
+                        "name": def.name,
+                        "description": def.description,
+                        "parameters": def.parameters,
+                    })
+                }).collect();
+                let tools = json!(tools);
+                info!("provider: sending request to {}/responses — model={} tools={}",
+                    base_url, config.model, config.tools.len());
 
                 // ── Build request body ────────────────────────────────────
                 let mut body = json!({
@@ -227,6 +240,7 @@ impl Provider for OpenRouterProvider {
 
                 let response = match resp {
                     Err(e) => {
+                        error!("provider: HTTP request failed — {}", e);
                         let _ = tx.send(AgentEvent::Error(e.to_string()));
                         return;
                     }
@@ -236,13 +250,18 @@ impl Provider for OpenRouterProvider {
                 if !response.status().is_success() {
                     let status = response.status();
                     let body_text = response.text().await.unwrap_or_default();
+                    error!("provider: HTTP {} — {}", status, body_text);
                     let _ = tx.send(AgentEvent::Error(format!("HTTP {}: {}", status, body_text)));
                     return;
                 }
 
+                info!("provider: HTTP {} — streaming started", response.status());
+
                 // ── Parse Responses API SSE stream ────────────────────────
                 let mut byte_stream = response.bytes_stream();
                 let mut buffer = String::new();
+                let mut tool_call_accum: std::collections::HashMap<usize, (String, String, String)> =
+                    std::collections::HashMap::new();
 
                 'outer: while let Some(chunk) = byte_stream.next().await {
                     match chunk {
@@ -268,7 +287,91 @@ impl Provider for OpenRouterProvider {
                                                     }
                                                 }
                                             }
+                                            "response.output_item.added" => {
+                                                if let (Some(idx), Some(item_type)) =
+                                                    (val["index"].as_u64(), val["item"]["type"].as_str())
+                                                {
+                                                    debug!("sse: output_item.added idx={} type={}", idx, item_type);
+                                                    if item_type == "function_call" {
+                                                        let call_id = val["item"]["call_id"]
+                                                            .as_str()
+                                                            .unwrap_or("")
+                                                            .to_string();
+                                                        let name = val["item"]["name"]
+                                                            .as_str()
+                                                            .unwrap_or("")
+                                                            .to_string();
+                                                        info!("sse: function_call started — name={} call_id={}", name, call_id);
+                                                        tool_call_accum.insert(idx as usize, (call_id, name, String::new()));
+                                                    }
+                                                }
+                                            }
+                                            "response.function_call_arguments.delta" => {
+                                                if let (Some(idx), Some(delta)) =
+                                                    (val["index"].as_u64(), val["delta"].as_str())
+                                                {
+                                                    if let Some(entry) = tool_call_accum.get_mut(&(idx as usize)) {
+                                                        entry.2.push_str(delta);
+                                                    }
+                                                }
+                                            }
+                                            "response.output_item.done" => {
+                                                if let (Some(idx), Some(item_type)) =
+                                                    (val["index"].as_u64(), val["item"]["type"].as_str())
+                                                {
+                                                    debug!("sse: output_item.done idx={} type={}", idx, item_type);
+                                                    if item_type == "function_call" {
+                                                        if let Some((call_id, name, _)) =
+                                                            tool_call_accum.remove(&(idx as usize))
+                                                        {
+                                                            let arguments = val["item"]["arguments"]
+                                                                .as_str()
+                                                                .unwrap_or("{}")
+                                                                .to_string();
+                                                            info!("sse: function_call done — name={} call_id={} args={}",
+                                                                name, call_id, arguments);
+                                                            let tc = ToolCallInfo {
+                                                                id: call_id,
+                                                                name,
+                                                                arguments,
+                                                            };
+                                                            let _ = tx.send(AgentEvent::ToolCall(tc));
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             "response.completed" => {
+                                                info!("sse: response.completed");
+                                                // Extract any function_call items from the
+                                                // completed response output.  OpenRouter does
+                                                // not emit output_item.added / output_item.done
+                                                // for tool calls, so this is the only reliable
+                                                // place to capture them.
+                                                if let Some(output) = val["response"]["output"].as_array() {
+                                                    for item in output {
+                                                        if item["type"].as_str() == Some("function_call") {
+                                                            let call_id = item["call_id"]
+                                                                .as_str()
+                                                                .unwrap_or("")
+                                                                .to_string();
+                                                            let name = item["name"]
+                                                                .as_str()
+                                                                .unwrap_or("")
+                                                                .to_string();
+                                                            let arguments = item["arguments"]
+                                                                .as_str()
+                                                                .unwrap_or("{}")
+                                                                .to_string();
+                                                            info!("sse: tool call from completed — name={} call_id={} args={}",
+                                                                name, call_id, arguments);
+                                                            let _ = tx.send(AgentEvent::ToolCall(ToolCallInfo {
+                                                                id: call_id,
+                                                                name,
+                                                                arguments,
+                                                            }));
+                                                        }
+                                                    }
+                                                }
                                                 let _ = tx.send(AgentEvent::Done);
                                                 break 'outer;
                                             }
@@ -277,10 +380,15 @@ impl Provider for OpenRouterProvider {
                                                     .as_str()
                                                     .unwrap_or("unknown error")
                                                     .to_string();
+                                                error!("sse: response.failed — {}", err);
                                                 let _ = tx.send(AgentEvent::Error(err));
                                                 break 'outer;
                                             }
-                                            _ => {}
+                                            other => {
+                                                if !other.is_empty() {
+                                                    debug!("sse: unhandled event type={}", other);
+                                                }
+                                            }
                                         }
                                     }
                                 }

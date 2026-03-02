@@ -3,7 +3,10 @@
     "allow": [
       "WebFetch(domain:openrouter.ai)",
       "Bash(cargo test:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:github.com)"
     ]
   }
 }

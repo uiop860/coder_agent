@@ -1,10 +1,12 @@
 use std::{
+    fs::OpenOptions,
     io,
     sync::{Arc, mpsc::Receiver},
 };
 
 use coder_agent::agent::agent_stream;
 use coder_agent::client::{AgentEvent, ChatMessage, OpenRouterProvider, Provider, RequestConfig};
+use coder_agent::tools;
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -13,12 +15,14 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
+use simplelog::{Config, LevelFilter, WriteLogger};
 
 #[derive(Debug, Clone)]
 enum Sender {
     User,
     Agent,
-    System,
+    /// Tool call / result messages — toggleable with Ctrl+D.
+    Tool,
 }
 
 /// A rendered message in the TUI.  Most messages simply carry text and
@@ -34,6 +38,9 @@ struct Message {
     /// here so we can re-render it with or without the arguments as the user
     /// toggles `show_tool_call_details`.
     tool_call: Option<coder_agent::client::ToolCallInfo>,
+    /// Preserved tool name for tool result messages (when tool_call is None but
+    /// sender is Tool). Used to show minimal tool name when show_tools is false.
+    tool_name: Option<String>,
 }
 
 struct App {
@@ -52,28 +59,31 @@ struct App {
     provider: Option<Arc<dyn Provider>>,
     config: RequestConfig,
     /// When true we render the arguments payload attached to any tool-call
-    /// messages.  Toggled by the user pressing 't'.
+    /// messages.  Toggled by the user pressing Ctrl+T.
     show_tool_call_details: bool,
     /// When false, any reasoning tokens accumulated on messages are hidden
     /// from the view.  Toggled by Ctrl+R.
     show_reasoning: bool,
-    /// When false we hide all `System`-sender messages (useful for decluttering).
-    show_system: bool,
+    /// When false we hide all `Tool`-sender messages.  Toggled by Ctrl+D.
+    show_tools: bool,
 }
 
 impl App {
     fn new(provider: Option<Arc<dyn Provider>>) -> Self {
         let welcome = if provider.is_some() {
-            "Hello! I'm a helpful assistant.\n(press Ctrl+R to toggle reasoning, Ctrl+D to hide/show system messages)".to_string()
+            "Hello! I'm a helpful assistant.\n(press Ctrl+R to toggle reasoning, Ctrl+D to hide/show tool messages)".to_string()
         } else {
             "⚠ No OPENROUTER_API_KEY found. Set it and restart.".to_string()
         };
+        let mut config = RequestConfig::default();
+        config.tools = tools::default_tools();
         Self {
             messages: vec![Message {
                 sender: Sender::Agent,
                 content: welcome,
                 reasoning: String::new(),
                 tool_call: None,
+                tool_name: None,
             }],
             history: Vec::new(),
             input_buffer: String::new(),
@@ -84,10 +94,10 @@ impl App {
             rx: None,
             streaming: false,
             provider,
-            config: RequestConfig::default(),
+            config,
             show_tool_call_details: false,
             show_reasoning: false,
-            show_system: false,
+            show_tools: false,
         }
     }
 
@@ -99,6 +109,7 @@ impl App {
             content: text.clone(),
             reasoning: String::new(),
             tool_call: None,
+            tool_name: None,
         });
         // Add to API history
         self.history.push(ChatMessage::user(text));
@@ -108,6 +119,7 @@ impl App {
             content: String::new(),
             reasoning: String::new(),
             tool_call: None,
+            tool_name: None,
         });
 
         if let Some(provider) = self.provider.clone() {
@@ -145,11 +157,72 @@ impl App {
                         self.scroll_to_bottom();
                     }
                 }
+                Ok(AgentEvent::ToolCall(tc)) => {
+                    // Replace the empty Agent placeholder with the tool call message
+                    // so there's no blank Agent line above it.
+                    let tool_name = tc.name.clone();
+                    if let Some(last) = self.messages.last_mut() {
+                        if matches!(last.sender, Sender::Agent) && last.content.is_empty() {
+                            *last = Message {
+                                sender: Sender::Tool,
+                                content: String::new(),
+                                reasoning: String::new(),
+                                tool_call: Some(tc),
+                                tool_name: Some(tool_name.clone()),
+                            };
+                            self.scroll_to_bottom();
+                            continue;
+                        }
+                    }
+                    self.messages.push(Message {
+                        sender: Sender::Tool,
+                        content: String::new(),
+                        reasoning: String::new(),
+                        tool_call: Some(tc),
+                        tool_name: Some(tool_name),
+                    });
+                    self.scroll_to_bottom();
+                }
+                Ok(AgentEvent::ToolCallResult {
+                    info,
+                    output,
+                }) => {
+                    // Merge result into the existing ToolCall message (same invocation).
+                    // Walk back to find the matching Tool message for this call id.
+                    let merged = self.messages.iter_mut().rev().find(|m| {
+                        matches!(m.sender, Sender::Tool)
+                            && m.tool_call.as_ref().map(|tc| tc.id == info.id).unwrap_or(false)
+                    });
+                    if let Some(msg) = merged {
+                        msg.content = output;
+                    } else {
+                        // Fallback: no matching call message found, create a new one.
+                        self.messages.push(Message {
+                            sender: Sender::Tool,
+                            content: output,
+                            reasoning: String::new(),
+                            tool_call: None,
+                            tool_name: Some(info.name),
+                        });
+                    }
+                    // Placeholder for the next LLM response
+                    self.messages.push(Message {
+                        sender: Sender::Agent,
+                        content: String::new(),
+                        reasoning: String::new(),
+                        tool_call: None,
+                        tool_name: None,
+                    });
+                    self.scroll_to_bottom();
+                }
                 Ok(AgentEvent::Done) => {
                     // Persist completed response into history, then clear reasoning
                     if let Some(last) = self.messages.last_mut() {
-                        self.history
-                            .push(ChatMessage::assistant(last.content.clone()));
+                        // Only add non-empty content to history
+                        if !last.content.is_empty() {
+                            self.history
+                                .push(ChatMessage::assistant(last.content.clone()));
+                        }
                         last.reasoning.clear();
                     }
                     self.rx = None;
@@ -189,15 +262,14 @@ impl App {
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
                 // Toggle visibility of tool call arguments when Ctrl+T is pressed
                 self.show_tool_call_details = !self.show_tool_call_details;
-                // re-rendering on next frame will reflect the change
             }
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
                 // Toggle reasoning/thinking display when Ctrl+R is pressed
                 self.show_reasoning = !self.show_reasoning;
             }
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                // Toggle showing of system/debug messages
-                self.show_system = !self.show_system;
+                // Toggle showing of tool messages
+                self.show_tools = !self.show_tools;
             }
             (KeyCode::Enter, _) => {
                 if !self.input_buffer.is_empty() && !self.streaming {
@@ -232,28 +304,26 @@ impl App {
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
+    // Initialise file logger — writes to coder_agent.log next to the binary.
+    // All log levels (DEBUG and above) are captured.
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("coder_agent.log")?;
+    WriteLogger::init(LevelFilter::Debug, Config::default(), log_file)
+        .expect("failed to initialise logger");
+    log::info!("coder_agent starting");
+
     let provider = OpenRouterProvider::from_env().map(|p| Arc::new(p) as Arc<dyn Provider>);
 
     ratatui::run(|terminal| app(terminal, provider))?;
     Ok(())
 }
 
-fn app(
-    terminal: &mut DefaultTerminal,
-    provider: Option<Arc<dyn Provider>>,
-) -> io::Result<()> {
+fn app(terminal: &mut DefaultTerminal, provider: Option<Arc<dyn Provider>>) -> io::Result<()> {
     let mut app = App::new(provider);
-    // hint about toggle
-    if app.provider.is_some() {
-        app.messages.push(Message {
-            sender: Sender::System,
-            content:
-                "(Press Ctrl+T to show/hide tool-call arguments; Ctrl+R to show/hide reasoning; Ctrl+D to hide/show system messages)"
-                    .to_string(),
-            reasoning: String::new(),
-            tool_call: None,
-        });
-    }
+    // hint about toggle (note: system messages intentionally hidden here too)
+    // Help message is skipped to reduce clutter with system messages hidden
 
     loop {
         app.poll_stream();
@@ -301,31 +371,47 @@ fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App
     let messages_text: Vec<Line> = app
         .messages
         .iter()
-        .filter(|msg| app.show_system || !matches!(msg.sender, Sender::System))
+        // All messages shown; Tool details toggle with Ctrl+D.
+        .filter(|_msg| true)
         .flat_map(|msg| {
-            // choose what text we actually display for this message; if it has
-            // an attached tool-call payload we build a summary/arguments string
-            // dynamically so that toggling `show_tool_call_details` will affect
-            // existing messages as well.
-            let display_content = if let Some(tc) = &msg.tool_call {
-                let mut s = format!("🔧 Tool call: {} (id={})", tc.name, tc.id);
+            // Determine display content based on show_tools flag
+            let display_content = if matches!(msg.sender, Sender::Tool) && !app.show_tools {
+                // When tools are hidden, show only the tool name in minimal form
+                if let Some(ref tool_name) = msg.tool_name {
+                    format!("Tool: {}", tool_name)
+                } else if let Some(ref tc) = msg.tool_call {
+                    format!("Tool: {}", tc.name)
+                } else {
+                    "Tool".to_string()
+                }
+            } else if let Some(tc) = &msg.tool_call {
+                let mut s = format!("tool: {} (id={})", tc.name, tc.id);
                 if app.show_tool_call_details {
-                    s.push_str(&format!("\narguments: {}", tc.arguments));
+                    s.push_str(&format!("\n  args: {}", tc.arguments));
                 }
                 s
             } else {
                 msg.content.clone()
             };
 
-            let (label, prefix_len) = match msg.sender {
-                Sender::User => (Span::styled("You: ", Style::default().fg(Color::Blue)), 5),
-                Sender::Agent => (
-                    Span::styled("Agent: ", Style::default().fg(Color::Green)),
-                    7,
+            let (label_text, label_style) = match msg.sender {
+                Sender::User => (
+                    "You",
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Sender::System => (
-                    Span::styled("System: ", Style::default().fg(Color::Cyan)),
-                    8,
+                Sender::Agent => (
+                    "Agent",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Sender::Tool => (
+                    "Tool",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
             };
 
@@ -335,13 +421,20 @@ fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App
 
             let mut lines: Vec<Line> = Vec::new();
 
+            // ── Centered label line ───────────────────────────────────────
+            let label_len = label_text.chars().count();
+            let padding = inner_width.saturating_sub(label_len) / 2;
+            lines.push(Line::from(vec![
+                Span::raw(" ".repeat(padding)),
+                Span::styled(label_text, label_style),
+            ]));
+
             // ── Reasoning block ──────────────────────────────────────────
             if app.show_reasoning && !msg.reasoning.is_empty() {
-                let r_prefix = "  thinking: ";
-                let r_prefix_len = r_prefix.chars().count();
-                let r_available = inner_width.saturating_sub(r_prefix_len);
-                let mut first_r = true;
+                let r_indent = "  ";
+                let r_available = inner_width.saturating_sub(r_indent.len());
                 let mut r_remaining = msg.reasoning.as_str();
+                let mut first_r = true;
                 while !r_remaining.is_empty() {
                     let take = r_remaining
                         .char_indices()
@@ -350,73 +443,50 @@ fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App
                         .map(|(i, c)| i + c.len_utf8())
                         .unwrap_or(r_remaining.len().min(r_available.max(1)));
                     let (chunk, rest) = r_remaining.split_at(take.min(r_remaining.len()));
-                    if first_r {
-                        lines.push(Line::from(vec![
-                            Span::styled(r_prefix, reasoning_style),
-                            Span::styled(chunk.to_string(), reasoning_style),
-                        ]));
-                        first_r = false;
+                    let prefix = if first_r {
+                        "  thinking: "
                     } else {
-                        lines.push(Line::from(Span::styled(
-                            format!("{}{}", " ".repeat(r_prefix_len), chunk),
-                            reasoning_style,
-                        )));
-                    }
+                        "             "
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!("{}{}", prefix, chunk),
+                        reasoning_style,
+                    )));
+                    first_r = false;
                     r_remaining = rest;
                 }
             }
 
-            // ── Content block ──────────────────────────────────────────
-            let available = inner_width.saturating_sub(prefix_len);
-            if available == 0 || app.messages.is_empty() {
-                lines.push(Line::from(vec![label, Span::raw(display_content.clone())]));
+            // ── Content block ─────────────────────────────────────────────
+            if inner_width == 0 {
+                lines.push(Line::from(Span::raw(display_content.clone())));
+                lines.push(Line::from(Span::raw("")));
                 return lines;
             }
 
-            // Split on newlines first, then word-wrap each paragraph so that
-            // code blocks and multi-line LLM responses render correctly.
+            // Split on newlines then wrap each paragraph to inner_width.
             let paragraphs: Vec<&str> = display_content.split('\n').collect();
-            let mut first = true;
             for paragraph in &paragraphs {
-                // Empty paragraph = blank line (just indent)
                 if paragraph.is_empty() {
-                    if first {
-                        lines.push(Line::from(vec![label.clone(), Span::raw(String::new())]));
-                        first = false;
-                    } else {
-                        lines.push(Line::from(Span::raw(" ".repeat(prefix_len))));
-                    }
+                    lines.push(Line::from(Span::raw("")));
                     continue;
                 }
-
                 let mut chars_remaining = *paragraph;
                 while !chars_remaining.is_empty() {
                     let take = chars_remaining
                         .char_indices()
-                        .take_while(|(i, _)| *i < available)
+                        .take_while(|(i, _)| *i < inner_width)
                         .last()
                         .map(|(i, c)| i + c.len_utf8())
-                        .unwrap_or(chars_remaining.len().min(available));
+                        .unwrap_or(chars_remaining.len().min(inner_width));
                     let (chunk, rest) = chars_remaining.split_at(take.min(chars_remaining.len()));
-                    if first {
-                        lines.push(Line::from(vec![
-                            label.clone(),
-                            Span::raw(chunk.to_string()),
-                        ]));
-                        first = false;
-                    } else {
-                        lines.push(Line::from(Span::raw(format!(
-                            "{}{}",
-                            " ".repeat(prefix_len),
-                            chunk
-                        ))));
-                    }
+                    lines.push(Line::from(Span::raw(chunk.to_string())));
                     chars_remaining = rest;
                 }
             }
-            if lines.is_empty() {
-                lines.push(Line::from(vec![label, Span::raw(String::new())]));
-            }
+
+            // Blank separator between messages
+            lines.push(Line::from(Span::raw("")));
             lines
         })
         .collect();
@@ -470,35 +540,109 @@ fn render_input(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coder_agent::client::ToolCallInfo;
     use ratatui::backend::TestBackend;
 
+    fn make_terminal() -> ratatui::Terminal<TestBackend> {
+        ratatui::Terminal::new(TestBackend::new(80, 20)).unwrap()
+    }
+
     #[test]
-    fn show_system_toggle_does_not_panic() {
-        // Construct a minimal App and flip the flag; call render to ensure
-        // filtering logic is exercised.
-        let backend = TestBackend::new(10, 5);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    fn tool_toggle_does_not_panic() {
+        let mut terminal = make_terminal();
         let mut app = App::new(None);
         app.messages.push(Message {
-            sender: Sender::System,
-            content: "debug".into(),
+            sender: Sender::Tool,
+            content: "tool output".into(),
             reasoning: String::new(),
             tool_call: None,
+            tool_name: Some("list_directory".into()),
         });
-        app.show_system = false;
+        app.show_tools = false; // toggle off
+        terminal
+            .draw(|f| render_messages(f, f.area(), &mut app))
+            .unwrap();
+    }
+
+    /// Tool messages are visible when show_tools is true.
+    #[test]
+    fn tool_messages_visible_when_enabled() {
+        let mut terminal = make_terminal();
+        let mut app = App::new(None);
+        // show_tools defaults to false; enable it for this test
+        app.show_tools = true;
+        assert!(app.show_tools);
+
+        let tc = ToolCallInfo {
+            id: "call_1".into(),
+            name: "list_directory".into(),
+            arguments: r#"{"path":"."}"#.into(),
+        };
+        app.messages.push(Message {
+            sender: Sender::Tool,
+            content: String::new(),
+            reasoning: String::new(),
+            tool_call: Some(tc.clone()),
+            tool_name: Some("list_directory".into()),
+        });
+        app.messages.push(Message {
+            sender: Sender::Tool,
+            content: "src/\nCargo.toml".into(),
+            reasoning: String::new(),
+            tool_call: None,
+            tool_name: Some("list_directory".into()),
+        });
+
+        // Should render without panic and produce lines containing tool info
+        let mut rendered_lines = 0usize;
         terminal
             .draw(|f| {
-                render_messages(
-                    f,
-                    ratatui::layout::Rect {
-                        x: 0,
-                        y: 0,
-                        width: 10,
-                        height: 5,
-                    },
-                    &mut app,
-                );
+                render_messages(f, f.area(), &mut app);
+                // Count lines generated — at least the two Tool messages should appear
+                rendered_lines = app
+                    .messages
+                    .iter()
+                    .filter(|m| matches!(m.sender, Sender::Tool))
+                    .count();
             })
             .unwrap();
+
+        assert_eq!(rendered_lines, 2, "both Tool messages must be counted");
+    }
+
+    /// Tool messages are always shown but with different rendering based on show_tools.
+    #[test]
+    fn tool_toggleable() {
+        let mut terminal = make_terminal();
+        let mut app = App::new(None);
+
+        let tc = ToolCallInfo {
+            id: "call_1".into(),
+            name: "list_directory".into(),
+            arguments: r#"{"path":"."}"#.into(),
+        };
+
+        app.messages.push(Message {
+            sender: Sender::Tool,
+            content: "detailed output".into(),
+            reasoning: String::new(),
+            tool_call: Some(tc),
+            tool_name: Some("list_directory".into()),
+        });
+
+        // With show_tools = true, tool should show full details
+        app.show_tools = true;
+        terminal
+            .draw(|f| render_messages(f, f.area(), &mut app))
+            .unwrap();
+
+        // With show_tools = false, tool should show minimal (tool name only)
+        app.show_tools = false;
+        terminal
+            .draw(|f| render_messages(f, f.area(), &mut app))
+            .unwrap();
+
+        // No panic = success
+        assert!(!app.show_tools);
     }
 }

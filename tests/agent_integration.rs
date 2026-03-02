@@ -67,3 +67,61 @@ fn test_provider_error_terminates() {
         "provider error must be forwarded to the caller"
     );
 }
+
+/// A single tool use cycle: agent requests a tool call, we execute it and send
+/// back the result, and the agent emits the tool call and result events.
+#[test]
+fn test_single_tool_use_cycle() {
+    use coder_agent::client::ToolCallInfo;
+
+    // First pass: LLM returns a tool call
+    // Second pass: LLM sees the tool result and returns plain text
+    let tool_call = ToolCallInfo {
+        id: "call_123".to_string(),
+        name: "read_file".to_string(),
+        arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+    };
+
+    let provider = MockProvider::new(vec![
+        // First pass: tool call
+        vec![
+            AgentEvent::ToolCall(tool_call.clone()),
+            AgentEvent::Done,
+        ],
+        // Second pass: plain text response after tool result
+        vec![
+            AgentEvent::Token("The file contains package metadata.".to_string()),
+            AgentEvent::Done,
+        ],
+    ]);
+
+    let mut config = cfg();
+    config.tools = coder_agent::tools::default_tools();
+
+    let rx = agent_stream(
+        Arc::new(provider),
+        vec![ChatMessage::user("Read the project manifest file")],
+        config,
+    );
+    let events = collect_events(rx);
+
+    // Verify the expected event sequence
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::ToolCall(_))),
+        "expected ToolCall event"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolCallResult { .. })),
+        "expected ToolCallResult event showing tool was executed"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::Token(_))),
+        "expected Token event from second LLM pass"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::Done)),
+        "expected Done event"
+    );
+}
