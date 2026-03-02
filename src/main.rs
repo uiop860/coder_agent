@@ -10,12 +10,68 @@ use coder_agent::tools;
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    layout::{Constraint, Direction, Layout, Position},
+    layout::{Constraint, Direction, Layout, Margin, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
+    },
 };
 use simplelog::{Config, LevelFilter, WriteLogger};
+
+struct SlashCommand {
+    name: &'static str,
+    description: &'static str,
+}
+
+const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand {
+        name: "/reasoning",
+        description: "Toggle reasoning / thinking display",
+    },
+    SlashCommand {
+        name: "/tools",
+        description: "Toggle tool result messages",
+    },
+    SlashCommand {
+        name: "/model",
+        description: "Choose the OpenRouter model",
+    },
+];
+
+struct ModelOption {
+    label: &'static str,
+    id: &'static str,
+}
+
+const MODELS: &[ModelOption] = &[
+    ModelOption {
+        label: "Nemotron 3 Nano 30B (free)",
+        id: "nvidia/nemotron-3-nano-30b-a3b:free",
+    },
+    ModelOption {
+        label: "Trinity Large (free)",
+        id: "arcee-ai/trinity-large-preview:free",
+    },
+    ModelOption {
+        label: "Step 3.5 Flash (free)",
+        id: "stepfun/step-3.5-flash:free",
+    },
+    ModelOption {
+        label: "GLM-4.5 Air (free)",
+        id: "z-ai/glm-4.5-air:free",
+    },
+];
+
+fn filtered_commands(input: &str) -> Vec<usize> {
+    SLASH_COMMANDS
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.name.starts_with(input))
+        .map(|(i, _)| i)
+        .collect()
+}
 
 #[derive(Debug, Clone)]
 enum Sender {
@@ -66,12 +122,18 @@ struct App {
     show_reasoning: bool,
     /// When false we hide all `Tool`-sender messages.  Toggled by Ctrl+D.
     show_tools: bool,
+    /// True when input starts with `/` and the slash-command popover is open.
+    slash_mode: bool,
+    /// Index of the highlighted row in the filtered slash-command list.
+    slash_selected: usize,
+    /// True when the model picker sub-menu is open (entered via /model).
+    slash_model_mode: bool,
 }
 
 impl App {
     fn new(provider: Option<Arc<dyn Provider>>) -> Self {
         let welcome = if provider.is_some() {
-            "Hello! I'm a helpful assistant.\n(press Ctrl+R to toggle reasoning, Ctrl+D to hide/show tool messages)".to_string()
+            "Hello! I'm a helpful assistant.\n(type / to access settings)".to_string()
         } else {
             "⚠ No OPENROUTER_API_KEY found. Set it and restart.".to_string()
         };
@@ -98,6 +160,9 @@ impl App {
             show_tool_call_details: false,
             show_reasoning: false,
             show_tools: false,
+            slash_mode: false,
+            slash_selected: 0,
+            slash_model_mode: false,
         }
     }
 
@@ -255,21 +320,95 @@ impl App {
             KeyEventKind::Press => {}
             _ => return false,
         }
+
+        // ── Model-picker sub-menu ────────────────────────────────────────────
+        if self.slash_model_mode {
+            match key.code {
+                KeyCode::Up => {
+                    self.slash_selected = self.slash_selected.saturating_sub(1);
+                }
+                KeyCode::Down => {
+                    self.slash_selected =
+                        (self.slash_selected + 1).min(MODELS.len() - 1);
+                }
+                KeyCode::Enter => {
+                    self.config.model = MODELS[self.slash_selected].id.to_string();
+                    self.slash_model_mode = false;
+                    self.slash_mode = false;
+                    self.slash_selected = 0;
+                    self.input_buffer.clear();
+                }
+                KeyCode::Esc => {
+                    self.slash_model_mode = false;
+                    self.slash_mode = false;
+                    self.slash_selected = 0;
+                    self.input_buffer.clear();
+                }
+                _ => {}
+            }
+            return false;
+        }
+
+        // ── Slash-mode navigation ────────────────────────────────────────────
+        if self.slash_mode {
+            let filtered = filtered_commands(&self.input_buffer);
+            match key.code {
+                KeyCode::Up => {
+                    self.slash_selected = self.slash_selected.saturating_sub(1);
+                }
+                KeyCode::Down => {
+                    if !filtered.is_empty() {
+                        self.slash_selected =
+                            (self.slash_selected + 1).min(filtered.len() - 1);
+                    }
+                }
+                KeyCode::Esc => {
+                    self.input_buffer.clear();
+                    self.slash_mode = false;
+                    self.slash_selected = 0;
+                }
+                KeyCode::Enter => {
+                    if !filtered.is_empty() {
+                        let cmd = SLASH_COMMANDS[filtered[self.slash_selected]].name;
+                        if cmd == "/model" {
+                            // Open model picker sub-menu; pre-select current model
+                            let current = self.config.model.as_str();
+                            self.slash_selected = MODELS
+                                .iter()
+                                .position(|m| m.id == current)
+                                .unwrap_or(0);
+                            self.slash_model_mode = true;
+                        } else {
+                            self.execute_slash_command(cmd);
+                            self.input_buffer.clear();
+                            self.slash_mode = false;
+                            self.slash_selected = 0;
+                        }
+                    } else {
+                        self.input_buffer.clear();
+                        self.slash_mode = false;
+                        self.slash_selected = 0;
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.input_buffer.pop();
+                    if self.input_buffer.is_empty() {
+                        self.slash_mode = false;
+                    }
+                    self.slash_selected = 0;
+                }
+                KeyCode::Char(c) => {
+                    self.input_buffer.push(c);
+                    self.slash_selected = 0;
+                }
+                _ => {}
+            }
+            return false;
+        }
+
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
                 return true; // Signal to quit
-            }
-            (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
-                // Toggle visibility of tool call arguments when Ctrl+T is pressed
-                self.show_tool_call_details = !self.show_tool_call_details;
-            }
-            (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
-                // Toggle reasoning/thinking display when Ctrl+R is pressed
-                self.show_reasoning = !self.show_reasoning;
-            }
-            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                // Toggle showing of tool messages
-                self.show_tools = !self.show_tools;
             }
             (KeyCode::Enter, _) => {
                 if !self.input_buffer.is_empty() && !self.streaming {
@@ -289,11 +428,23 @@ impl App {
                 self.input_buffer.pop();
             }
             (KeyCode::Char(c), _) => {
+                if c == '/' && self.input_buffer.is_empty() {
+                    self.slash_mode = true;
+                    self.slash_selected = 0;
+                }
                 self.input_buffer.push(c);
             }
             _ => {}
         }
         false
+    }
+
+    fn execute_slash_command(&mut self, cmd: &str) {
+        match cmd {
+            "/reasoning" => self.show_reasoning = !self.show_reasoning,
+            "/tools" => self.show_tools = !self.show_tools,
+            _ => {}
+        }
     }
 
     fn scroll_to_bottom(&mut self) {
@@ -308,7 +459,8 @@ fn main() -> color_eyre::Result<()> {
     // All log levels (DEBUG and above) are captured.
     let log_file = OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open("coder_agent.log")?;
     WriteLogger::init(LevelFilter::Debug, Config::default(), log_file)
         .expect("failed to initialise logger");
@@ -360,8 +512,51 @@ fn render(frame: &mut Frame, app: &mut App) {
     // Render messages area
     render_messages(frame, chunks[0], app);
 
+    // Render slash-command popover (above input, when active)
+    if app.slash_mode || app.slash_model_mode {
+        render_slash_popover(frame, chunks[1], app);
+    }
+
     // Render input area
     render_input(frame, chunks[1], app);
+}
+
+fn render_plain_text(content: &str, text_width: usize, dot_style: Style) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let prefix_dot = "● ";
+    let prefix_cont = "  ";
+    let paragraphs: Vec<&str> = content.split('\n').collect();
+    let mut is_first_line = true;
+    for paragraph in &paragraphs {
+        if paragraph.is_empty() {
+            lines.push(Line::from(Span::raw("")));
+            continue;
+        }
+        let mut chars_remaining = *paragraph;
+        while !chars_remaining.is_empty() {
+            let take = chars_remaining
+                .char_indices()
+                .take_while(|(i, _)| *i < text_width)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(chars_remaining.len().min(text_width));
+            let (chunk, rest) = chars_remaining.split_at(take.min(chars_remaining.len()));
+            if is_first_line {
+                lines.push(Line::from(vec![
+                    Span::styled(prefix_dot.to_string(), dot_style),
+                    Span::raw(chunk.to_string()),
+                ]));
+                is_first_line = false;
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw(prefix_cont.to_string()),
+                    Span::raw(chunk.to_string()),
+                ]));
+            }
+            chars_remaining = rest;
+        }
+    }
+    lines
 }
 
 fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App) {
@@ -394,25 +589,10 @@ fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App
                 msg.content.clone()
             };
 
-            let (label_text, label_style) = match msg.sender {
-                Sender::User => (
-                    "You",
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Sender::Agent => (
-                    "Agent",
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Sender::Tool => (
-                    "Tool",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
+            let dot_style = match msg.sender {
+                Sender::User => Style::default().fg(Color::Blue),
+                Sender::Agent => Style::default().fg(Color::Green),
+                Sender::Tool => Style::default().fg(Color::Yellow),
             };
 
             let reasoning_style = Style::default()
@@ -421,39 +601,18 @@ fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App
 
             let mut lines: Vec<Line> = Vec::new();
 
-            // ── Centered label line ───────────────────────────────────────
-            let label_len = label_text.chars().count();
-            let padding = inner_width.saturating_sub(label_len) / 2;
-            lines.push(Line::from(vec![
-                Span::raw(" ".repeat(padding)),
-                Span::styled(label_text, label_style),
-            ]));
-
-            // ── Reasoning block ──────────────────────────────────────────
-            if app.show_reasoning && !msg.reasoning.is_empty() {
-                let r_indent = "  ";
-                let r_available = inner_width.saturating_sub(r_indent.len());
-                let mut r_remaining = msg.reasoning.as_str();
-                let mut first_r = true;
-                while !r_remaining.is_empty() {
-                    let take = r_remaining
-                        .char_indices()
-                        .take_while(|(i, _)| *i < r_available.max(1))
-                        .last()
-                        .map(|(i, c)| i + c.len_utf8())
-                        .unwrap_or(r_remaining.len().min(r_available.max(1)));
-                    let (chunk, rest) = r_remaining.split_at(take.min(r_remaining.len()));
-                    let prefix = if first_r {
-                        "  thinking: "
-                    } else {
-                        "             "
-                    };
-                    lines.push(Line::from(Span::styled(
-                        format!("{}{}", prefix, chunk),
-                        reasoning_style,
-                    )));
-                    first_r = false;
-                    r_remaining = rest;
+            // ── Reasoning (last two word-wrapped lines) ──────────────────────
+            if !msg.reasoning.is_empty() {
+                let prefix = "  ⟳ ";
+                let avail = inner_width.saturating_sub(prefix.len()).max(1);
+                // Word-wrap the full reasoning text and keep only the last two lines.
+                let wrapped = textwrap::wrap(msg.reasoning.trim_end(), avail);
+                let start = wrapped.len().saturating_sub(2);
+                for chunk in &wrapped[start..] {
+                    lines.push(Line::from(vec![
+                        Span::styled(prefix, reasoning_style),
+                        Span::styled(chunk.to_string(), reasoning_style),
+                    ]));
                 }
             }
 
@@ -464,26 +623,14 @@ fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App
                 return lines;
             }
 
-            // Split on newlines then wrap each paragraph to inner_width.
-            let paragraphs: Vec<&str> = display_content.split('\n').collect();
-            for paragraph in &paragraphs {
-                if paragraph.is_empty() {
-                    lines.push(Line::from(Span::raw("")));
-                    continue;
-                }
-                let mut chars_remaining = *paragraph;
-                while !chars_remaining.is_empty() {
-                    let take = chars_remaining
-                        .char_indices()
-                        .take_while(|(i, _)| *i < inner_width)
-                        .last()
-                        .map(|(i, c)| i + c.len_utf8())
-                        .unwrap_or(chars_remaining.len().min(inner_width));
-                    let (chunk, rest) = chars_remaining.split_at(take.min(chars_remaining.len()));
-                    lines.push(Line::from(Span::raw(chunk.to_string())));
-                    chars_remaining = rest;
-                }
-            }
+            let text_width = inner_width.saturating_sub(2).max(1);
+
+            let content_lines: Vec<Line<'static>> = if matches!(msg.sender, Sender::Agent) {
+                coder_agent::markdown::render_markdown(&display_content, text_width, dot_style)
+            } else {
+                render_plain_text(&display_content, text_width, dot_style)
+            };
+            lines.extend(content_lines);
 
             // Blank separator between messages
             lines.push(Line::from(Span::raw("")));
@@ -506,6 +653,110 @@ fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App
         .scroll((scroll, 0));
 
     frame.render_widget(messages_widget, area);
+
+    // Scrollbar — only shown when content exceeds the visible area.
+    // Ratatui's thumb formula: thumb_end reaches the bottom only when
+    // position == content_length - 1, so we remap scroll (0..auto_scroll)
+    // to position (0..total_lines-1).
+    if auto_scroll > 0 {
+        let scrollbar_pos = (scroll as usize) * (total_lines - 1) / auto_scroll;
+        let mut scrollbar_state = ScrollbarState::new(total_lines)
+            .viewport_content_length(visible_height)
+            .position(scrollbar_pos);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        frame.render_stateful_widget(
+            scrollbar,
+            area.inner(Margin { vertical: 1, horizontal: 0 }),
+            &mut scrollbar_state,
+        );
+    }
+}
+
+fn render_slash_popover(frame: &mut Frame, input_area: Rect, app: &App) {
+    if app.slash_model_mode {
+        render_model_picker(frame, input_area, app);
+        return;
+    }
+
+    let filtered = filtered_commands(&app.input_buffer);
+    if filtered.is_empty() {
+        return;
+    }
+
+    let height = filtered.len() as u16 + 2; // +2 for borders
+    let popup_area = Rect {
+        x: input_area.x,
+        y: input_area.y.saturating_sub(height),
+        width: input_area.width,
+        height,
+    };
+
+    frame.render_widget(Clear, popup_area);
+
+    let items: Vec<ListItem> = filtered
+        .iter()
+        .enumerate()
+        .map(|(row_idx, &cmd_idx)| {
+            let cmd = &SLASH_COMMANDS[cmd_idx];
+            let state_label = match cmd.name {
+                "/reasoning" => {
+                    if app.show_reasoning { "[on]" } else { "[off]" }
+                }
+                "/tools" => {
+                    if app.show_tools { "[on]" } else { "[off]" }
+                }
+                "/model" => &app.config.model,
+                _ => "",
+            };
+            let text = format!("  {}  –  {}  {}", cmd.name, cmd.description, state_label);
+            if row_idx == app.slash_selected {
+                ListItem::new(text).style(Style::default().bg(Color::Blue).fg(Color::White))
+            } else {
+                ListItem::new(text).style(Style::default().fg(Color::Gray))
+            }
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title("Settings"));
+
+    frame.render_widget(list, popup_area);
+}
+
+fn render_model_picker(frame: &mut Frame, input_area: Rect, app: &App) {
+    let height = MODELS.len() as u16 + 2;
+    let popup_area = Rect {
+        x: input_area.x,
+        y: input_area.y.saturating_sub(height),
+        width: input_area.width,
+        height,
+    };
+
+    frame.render_widget(Clear, popup_area);
+
+    let items: Vec<ListItem> = MODELS
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let active = m.id == app.config.model;
+            let marker = if active { " ✓" } else { "  " };
+            let text = format!("{}  {}  ({})", marker, m.label, m.id);
+            if i == app.slash_selected {
+                ListItem::new(text).style(Style::default().bg(Color::Blue).fg(Color::White))
+            } else if active {
+                ListItem::new(text).style(Style::default().fg(Color::Green))
+            } else {
+                ListItem::new(text).style(Style::default().fg(Color::Gray))
+            }
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title("Choose model  (Enter to select · Esc to cancel)"));
+
+    frame.render_widget(list, popup_area);
 }
 
 fn render_input(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {

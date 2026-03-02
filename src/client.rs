@@ -287,6 +287,13 @@ impl Provider for OpenRouterProvider {
                                                     }
                                                 }
                                             }
+                                            "response.reasoning_text.delta" => {
+                                                if let Some(delta) = val["delta"].as_str() {
+                                                    if !delta.is_empty() {
+                                                        let _ = tx.send(AgentEvent::ReasoningToken(delta.to_string()));
+                                                    }
+                                                }
+                                            }
                                             "response.output_item.added" => {
                                                 if let (Some(idx), Some(item_type)) =
                                                     (val["index"].as_u64(), val["item"]["type"].as_str())

@@ -6,7 +6,10 @@
       "Bash(cargo build:*)",
       "Bash(cargo check:*)",
       "WebFetch(domain:docs.rs)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "mcp__plugin_context7_context7__resolve-library-id",
+      "mcp__plugin_context7_context7__query-docs",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }
