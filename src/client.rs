@@ -13,7 +13,15 @@ pub enum AgentEvent {
     Done,
     Error(String),
     ToolCall(ToolCallInfo),
-    ToolCallResult { info: ToolCallInfo, output: String },
+    ToolCallResult {
+        info: ToolCallInfo,
+        output: String,
+    },
+    /// Token usage reported by the provider at the end of a response.
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
 }
 
 // ── Shared message / config types ─────────────────────────────────────────────
@@ -120,10 +128,12 @@ pub struct OpenRouterProvider {
     api_key: String,
     base_url: String,
     client: reqwest::Client,
+    rt: std::sync::Arc<tokio::runtime::Runtime>,
 }
 
 impl OpenRouterProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let client = reqwest::Client::builder()
             .pool_max_idle_per_host(10)
             .build()
@@ -133,6 +143,7 @@ impl OpenRouterProvider {
             api_key: api_key.into(),
             base_url: "https://openrouter.ai/api/v1".to_string(),
             client,
+            rt: std::sync::Arc::new(rt),
         }
     }
 
@@ -148,9 +159,9 @@ impl Provider for OpenRouterProvider {
         let base_url = self.base_url.clone();
         let config = config.clone();
         let client = self.client.clone();
+        let rt = self.rt.clone();
 
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
             rt.block_on(async move {
                 // ── Build input array (Responses API format) ──────────────
                 let mut input: Vec<Value> = Vec::new();
@@ -402,6 +413,14 @@ impl Provider for OpenRouterProvider {
                                                             }));
                                                         }
                                                     }
+                                                }
+                                                // Emit token usage before Done
+                                                let input_tokens = val["response"]["usage"]["input_tokens"]
+                                                    .as_u64().unwrap_or(0);
+                                                let output_tokens = val["response"]["usage"]["output_tokens"]
+                                                    .as_u64().unwrap_or(0);
+                                                if input_tokens > 0 || output_tokens > 0 {
+                                                    let _ = tx.send(AgentEvent::Usage { input_tokens, output_tokens });
                                                 }
                                                 let _ = tx.send(AgentEvent::Done);
                                                 break 'outer;

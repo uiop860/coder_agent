@@ -98,29 +98,39 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/model",
         description: "Choose the OpenRouter model",
     },
+    SlashCommand {
+        name: "/clear",
+        description: "Clear the conversation context",
+    },
 ];
 
 struct ModelOption {
     label: &'static str,
     id: &'static str,
+    /// Maximum context window in tokens for this model.
+    context_window: u64,
 }
 
 const MODELS: &[ModelOption] = &[
     ModelOption {
         label: "Nemotron 3 Nano 30B (free)",
         id: "nvidia/nemotron-3-nano-30b-a3b:free",
+        context_window: 256_000,
     },
     ModelOption {
         label: "Trinity Large (free)",
         id: "arcee-ai/trinity-large-preview:free",
+        context_window: 131_000,
     },
     ModelOption {
         label: "Step 3.5 Flash (free)",
         id: "stepfun/step-3.5-flash:free",
+        context_window: 256_000,
     },
     ModelOption {
         label: "GLM-4.5 Air (free)",
         id: "z-ai/glm-4.5-air:free",
+        context_window: 131_072,
     },
 ];
 
@@ -190,12 +200,22 @@ struct App {
     slash_selected: usize,
     /// True when the model picker sub-menu is open (entered via /model).
     slash_model_mode: bool,
+    /// Accumulated input tokens across all completed responses.
+    total_input_tokens: u64,
+    /// Accumulated output tokens across all completed responses.
+    total_output_tokens: u64,
+    /// Input token count from the most recent completed response (for context % display).
+    last_input_tokens: u64,
+    /// Animated display value for input tokens (scrolls toward total_input_tokens each frame).
+    displayed_input_tokens: u64,
+    /// Animated display value for output tokens (scrolls toward total_output_tokens each frame).
+    displayed_output_tokens: u64,
 }
 
 impl App {
     fn new(provider: Option<Arc<dyn Provider>>) -> Self {
         let welcome = if provider.is_some() {
-            "Hello! I'm a helpful assistant.\n(type / to access settings)".to_string()
+            "Hello! I'm a helpful assistant.".to_string()
         } else {
             "⚠ No OPENROUTER_API_KEY found. Set it and restart.".to_string()
         };
@@ -226,6 +246,11 @@ impl App {
             slash_mode: false,
             slash_selected: 0,
             slash_model_mode: false,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            last_input_tokens: 0,
+            displayed_input_tokens: 0,
+            displayed_output_tokens: 0,
         }
     }
 
@@ -356,6 +381,14 @@ impl App {
                     self.rx = None;
                     self.streaming = false;
                     break;
+                }
+                Ok(AgentEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                }) => {
+                    self.total_input_tokens += input_tokens;
+                    self.total_output_tokens += output_tokens;
+                    self.last_input_tokens = input_tokens;
                 }
                 Ok(AgentEvent::Error(e)) => {
                     if let Some(last) = self.messages.last_mut() {
@@ -553,12 +586,43 @@ impl App {
         match cmd {
             "/reasoning" => self.show_reasoning = !self.show_reasoning,
             "/tools" => self.show_tools = !self.show_tools,
+            "/clear" => {
+                self.messages.clear();
+                self.history.clear();
+                self.scroll_offset = 0;
+                self.total_input_tokens = 0;
+                self.total_output_tokens = 0;
+                self.last_input_tokens = 0;
+                self.displayed_input_tokens = 0;
+                self.displayed_output_tokens = 0;
+            }
             _ => {}
         }
     }
 
     fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0; // 0 = follow bottom
+    }
+
+    /// Advance animated display values one step toward their targets.
+    /// Uses geometric easing: step = max(1, diff / 4) so it closes ~75% of
+    /// the remaining gap each frame (~250 ms to settle at 60 fps).
+    fn tick_token_animation(&mut self) {
+        let step_in = ((self
+            .total_input_tokens
+            .saturating_sub(self.displayed_input_tokens))
+            / 4)
+        .max(1);
+        self.displayed_input_tokens =
+            (self.displayed_input_tokens + step_in).min(self.total_input_tokens);
+
+        let step_out = ((self
+            .total_output_tokens
+            .saturating_sub(self.displayed_output_tokens))
+            / 4)
+        .max(1);
+        self.displayed_output_tokens =
+            (self.displayed_output_tokens + step_out).min(self.total_output_tokens);
     }
 }
 
@@ -589,6 +653,7 @@ fn app(terminal: &mut DefaultTerminal, provider: Option<Arc<dyn Provider>>) -> i
 
     loop {
         app.poll_stream();
+        app.tick_token_animation();
 
         if app.scroll_up_held {
             app.scroll_offset = app.scroll_offset.saturating_add(1).min(app.max_scroll);
@@ -616,7 +681,11 @@ fn app(terminal: &mut DefaultTerminal, provider: Option<Arc<dyn Provider>>) -> i
 fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ])
         .split(frame.area());
 
     // Render messages area
@@ -629,6 +698,9 @@ fn render(frame: &mut Frame, app: &mut App) {
 
     // Render input area
     render_input(frame, chunks[1], app);
+
+    // Render status bar
+    render_status_bar(frame, chunks[2], app);
 }
 
 fn render_plain_text(content: &str, text_width: usize, dot_style: Style) -> Vec<Line<'static>> {
@@ -885,9 +957,9 @@ fn render_model_picker(frame: &mut Frame, input_area: Rect, app: &App) {
 fn render_input(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     let input_text = format!("> {}", app.input_buffer);
     let title = if app.streaming {
-        "Input – waiting for response… (Ctrl+C to quit)"
+        "Input – waiting for response…"
     } else {
-        "Input (Enter to send · Ctrl+C to quit)"
+        "Input"
     };
     let style = if app.streaming {
         Style::default().fg(Color::DarkGray)
@@ -902,17 +974,81 @@ fn render_input(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     frame.render_widget(input_widget, area);
 
     // Set cursor position in the input area.
-    // Use display width of the text before the cursor for correct Unicode alignment.
-    if area.height > 0 {
+    // Skip while animating or streaming: ratatui moves the physical terminal
+    // cursor through every changed cell during diff painting.  When the status
+    // bar numbers are changing each frame the cursor visibly drags across them
+    // before being repositioned here.  Not calling set_cursor_position hides
+    // the cursor for those frames, which looks much cleaner.
+    let animating = app.displayed_input_tokens != app.total_input_tokens
+        || app.displayed_output_tokens != app.total_output_tokens;
+    if !app.streaming && !animating && area.height > 0 {
         let before_cursor = &app.input_buffer[..app.cursor_pos];
         let display_width = UnicodeWidthStr::width(before_cursor) as u16;
-        // area.x + 1 (left border) + 2 ("> ") + display_width
         let cursor_x = area.x + 1 + 2 + display_width;
         let cursor_y = area.y + 1;
         if cursor_x < area.right() && cursor_y < area.bottom() {
             frame.set_cursor_position(Position::new(cursor_x.min(area.right() - 1), cursor_y));
         }
     }
+}
+
+/// Return the context-window size for a known model id, or a generic fallback.
+fn model_context_window(model_id: &str) -> u64 {
+    MODELS
+        .iter()
+        .find(|m| m.id == model_id)
+        .map(|m| m.context_window)
+        .unwrap_or(128_000) // safe fallback for unknown models
+}
+
+fn render_status_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    let total = app.displayed_input_tokens + app.displayed_output_tokens;
+
+    // Context percentage — based on the last request's input token count.
+    let ctx_window = model_context_window(&app.config.model);
+    let (ctx_str, ctx_color) = if app.last_input_tokens == 0 {
+        ("–".to_string(), Color::DarkGray)
+    } else {
+        let pct = app.last_input_tokens as f64 / ctx_window as f64 * 100.0;
+        let color = if pct >= 90.0 {
+            Color::Red
+        } else if pct >= 70.0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        (format!("{:.1}%", pct), color)
+    };
+
+    let line = Line::from(vec![
+        Span::styled("  In: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{}", app.displayed_input_tokens),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled("  Out: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{}", app.displayed_output_tokens),
+            Style::default().fg(Color::Green),
+        ),
+        Span::styled("  Total: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", total), Style::default().fg(Color::Yellow)),
+        Span::styled("   │  Ctx: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(ctx_str, Style::default().fg(ctx_color)),
+        Span::styled(
+            format!(" /{}", ctx_window),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled("   │  Model: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            app.config.model.clone(),
+            Style::default().fg(Color::Magenta),
+        ),
+    ]);
+
+    let widget =
+        Paragraph::new(vec![line]).block(Block::default().borders(Borders::ALL).title("Session"));
+    frame.render_widget(widget, area);
 }
 
 #[cfg(test)]

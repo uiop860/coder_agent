@@ -76,7 +76,7 @@ impl MdRenderer {
             PrefixKind::Normal => {
                 if !self.first_line_emitted {
                     self.first_line_emitted = true;
-                    Span::styled("● ", Style::default().fg(Color::White))
+                    Span::styled("● ", Style::default().fg(Color::Green))
                 } else {
                     Span::raw("  ")
                 }
@@ -84,7 +84,7 @@ impl MdRenderer {
             PrefixKind::Bullet => {
                 if is_first_bullet {
                     let indent = "  ".repeat(self.list_depth.saturating_sub(1) as usize);
-                    Span::styled(format!("{}• ", indent), Style::default().fg(Color::Green))
+                    Span::styled(format!("{}• ", indent), Style::default().fg(Color::White))
                 } else {
                     let indent = "  ".repeat(self.list_depth as usize);
                     Span::raw(indent)

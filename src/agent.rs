@@ -50,6 +50,10 @@ fn run_one_llm_pass(
             Ok(AgentEvent::ToolCallResult { .. }) => {
                 // Should not come from provider; ignore.
             }
+            Ok(AgentEvent::Usage { input_tokens, output_tokens }) => {
+                // Forward usage stats to the TUI.
+                let _ = tx.send(AgentEvent::Usage { input_tokens, output_tokens });
+            }
             Err(_) => {
                 error!("run_one_llm_pass: provider channel closed unexpectedly");
                 return Err("provider channel closed unexpectedly".to_string());
