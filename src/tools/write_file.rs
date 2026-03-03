@@ -44,11 +44,11 @@ impl Tool for WriteFileTool {
         let file_path = Path::new(path);
 
         // Create parent directories if needed
-        if let Some(parent) = file_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create parent directories: {}", e))?;
-            }
+        if let Some(parent) = file_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create parent directories: {}", e))?;
         }
 
         // Write the file

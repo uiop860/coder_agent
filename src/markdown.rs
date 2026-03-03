@@ -20,6 +20,10 @@ enum PrefixKind {
     Blockquote,
 }
 
+type StyledText = (String, Style);
+type TableCell = Vec<StyledText>;
+type TableRow = (bool, Vec<TableCell>);
+
 struct MdRenderer {
     output: Vec<Line<'static>>,
     inline_buf: Vec<(String, Style)>,
@@ -31,8 +35,8 @@ struct MdRenderer {
     first_line_emitted: bool,
     text_width: usize,
     // Table state
-    table_rows: Vec<(bool, Vec<Vec<(String, Style)>>)>, // (is_header, cells)
-    table_current_cells: Vec<Vec<(String, Style)>>,
+    table_rows: Vec<TableRow>, // (is_header, cells)
+    table_current_cells: Vec<TableCell>,
 }
 
 impl MdRenderer {

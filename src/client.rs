@@ -300,22 +300,23 @@ impl Provider for OpenRouterProvider {
                                 let line = buffer[..pos].trim().to_string();
                                 buffer.drain(..=pos);
 
-                                if let Some(data) = line.strip_prefix("data: ") {
-                                    if let Ok(val) = serde_json::from_str::<Value>(data) {
+                                if let Some(data) = line.strip_prefix("data: ")
+                                    && let Ok(val) = serde_json::from_str::<Value>(data)
+                                {
                                         let event_type = val["type"].as_str().unwrap_or("");
                                         match event_type {
                                             "response.output_text.delta" => {
-                                                if let Some(delta) = val["delta"].as_str() {
-                                                    if !delta.is_empty() {
-                                                        let _ = tx.send(AgentEvent::Token(delta.to_string()));
-                                                    }
+                                                if let Some(delta) = val["delta"].as_str()
+                                                    && !delta.is_empty()
+                                                {
+                                                    let _ = tx.send(AgentEvent::Token(delta.to_string()));
                                                 }
                                             }
                                             "response.reasoning_text.delta" => {
-                                                if let Some(delta) = val["delta"].as_str() {
-                                                    if !delta.is_empty() {
-                                                        let _ = tx.send(AgentEvent::ReasoningToken(delta.to_string()));
-                                                    }
+                                                if let Some(delta) = val["delta"].as_str()
+                                                    && !delta.is_empty()
+                                                {
+                                                    let _ = tx.send(AgentEvent::ReasoningToken(delta.to_string()));
                                                 }
                                             }
                                             "response.output_item.added" => {
@@ -353,23 +354,22 @@ impl Provider for OpenRouterProvider {
                                                     (val["index"].as_u64(), val["item"]["type"].as_str())
                                                 {
                                                     debug!("sse: output_item.done idx={} type={}", idx, item_type);
-                                                    if item_type == "function_call" {
-                                                        if let Some((call_id, name, _)) =
+                                                    if item_type == "function_call"
+                                                        && let Some((call_id, name, _)) =
                                                             tool_call_accum.remove(&(idx as usize))
-                                                        {
-                                                            let arguments = val["item"]["arguments"]
-                                                                .as_str()
-                                                                .unwrap_or("{}")
-                                                                .to_string();
-                                                            info!("sse: function_call done — name={} call_id={} args={}",
-                                                                name, call_id, arguments);
-                                                            let tc = ToolCallInfo {
-                                                                id: call_id,
-                                                                name,
-                                                                arguments,
-                                                            };
-                                                            let _ = tx.send(AgentEvent::ToolCall(tc));
-                                                        }
+                                                    {
+                                                        let arguments = val["item"]["arguments"]
+                                                            .as_str()
+                                                            .unwrap_or("{}")
+                                                            .to_string();
+                                                        info!("sse: function_call done — name={} call_id={} args={}",
+                                                            name, call_id, arguments);
+                                                        let tc = ToolCallInfo {
+                                                            id: call_id,
+                                                            name,
+                                                            arguments,
+                                                        };
+                                                        let _ = tx.send(AgentEvent::ToolCall(tc));
                                                     }
                                                 }
                                             }
@@ -440,7 +440,6 @@ impl Provider for OpenRouterProvider {
                                                 }
                                             }
                                         }
-                                    }
                                 }
                             }
                         }

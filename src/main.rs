@@ -222,8 +222,10 @@ impl App {
         } else {
             "⚠ No OPENROUTER_API_KEY found. Set it and restart.".to_string()
         };
-        let mut config = RequestConfig::default();
-        config.tools = tools::default_tools();
+        let config = RequestConfig {
+            tools: tools::default_tools(),
+            ..RequestConfig::default()
+        };
         Self {
             messages: vec![Message {
                 sender: Sender::Agent,
@@ -318,18 +320,19 @@ impl App {
                     // Replace the empty Agent placeholder with the tool call message
                     // so there's no blank Agent line above it.
                     let tool_name = tc.name.clone();
-                    if let Some(last) = self.messages.last_mut() {
-                        if matches!(last.sender, Sender::Agent) && last.content.is_empty() {
-                            *last = Message {
-                                sender: Sender::Tool,
-                                content: String::new(),
-                                reasoning: String::new(),
-                                tool_call: Some(tc),
-                                tool_name: Some(tool_name.clone()),
-                            };
-                            self.scroll_to_bottom();
-                            continue;
-                        }
+                    if let Some(last) = self.messages.last_mut()
+                        && matches!(last.sender, Sender::Agent)
+                        && last.content.is_empty()
+                    {
+                        *last = Message {
+                            sender: Sender::Tool,
+                            content: String::new(),
+                            reasoning: String::new(),
+                            tool_call: Some(tc),
+                            tool_name: Some(tool_name.clone()),
+                        };
+                        self.scroll_to_bottom();
+                        continue;
                     }
                     self.messages.push(Message {
                         sender: Sender::Tool,
@@ -670,15 +673,12 @@ fn app(terminal: &mut DefaultTerminal, provider: Option<Arc<dyn Provider>>) -> i
 
         terminal.draw(|frame| render(frame, &mut app))?;
 
-        if event::poll(std::time::Duration::from_millis(16))? {
-            match event::read()? {
-                Event::Key(key_event) => {
-                    let should_quit = app.handle_key_event(key_event);
-                    if should_quit {
-                        break Ok(());
-                    }
-                }
-                _ => {}
+        if event::poll(std::time::Duration::from_millis(16))?
+            && let Event::Key(key_event) = event::read()?
+        {
+            let should_quit = app.handle_key_event(key_event);
+            if should_quit {
+                break Ok(());
             }
         }
     }
@@ -815,12 +815,11 @@ fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App
             let text_width = inner_width.saturating_sub(2).max(1);
 
             let display_text = display_content.as_str();
-            let content_lines: Vec<Line<'static>>;
-            if matches!(msg.sender, Sender::Agent) {
-                content_lines = coder_agent::markdown::render_markdown(display_text, text_width);
+            let content_lines: Vec<Line<'static>> = if matches!(msg.sender, Sender::Agent) {
+                coder_agent::markdown::render_markdown(display_text, text_width)
             } else {
-                content_lines = render_plain_text(display_text, text_width, dot_style);
-            }
+                render_plain_text(display_text, text_width, dot_style)
+            };
             lines.extend(content_lines);
 
             // Blank separator between messages

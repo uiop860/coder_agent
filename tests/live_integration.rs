@@ -22,7 +22,7 @@ fn live_provider() -> Arc<OpenRouterProvider> {
     dotenvy::dotenv().ok();
     match OpenRouterProvider::from_env() {
         Some(p) => Arc::new(p),
-        None => panic!(
+        Option::None => panic!(
             "OPENROUTER_API_KEY is not set — add it to .env or export it before running live tests"
         ),
     }
@@ -30,9 +30,10 @@ fn live_provider() -> Arc<OpenRouterProvider> {
 
 /// Build a `RequestConfig` with all default codebase tools loaded.
 fn live_config() -> RequestConfig {
-    let mut cfg = RequestConfig::default();
-    cfg.tools = tools::default_tools();
-    cfg
+    RequestConfig {
+        tools: tools::default_tools(),
+        ..RequestConfig::default()
+    }
 }
 
 /// Drain the receiver until `Done` or `Error`, collecting every event.

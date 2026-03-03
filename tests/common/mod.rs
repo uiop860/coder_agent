@@ -50,16 +50,11 @@ impl Provider for MockProvider {
 /// `Error`, or when the channel closes (agent thread exited).
 pub fn collect_events(rx: Receiver<AgentEvent>) -> Vec<AgentEvent> {
     let mut events = Vec::new();
-    loop {
-        match rx.recv() {
-            Ok(event) => {
-                let is_terminal = matches!(event, AgentEvent::Done | AgentEvent::Error(_));
-                events.push(event);
-                if is_terminal {
-                    break;
-                }
-            }
-            Err(_) => break, // channel closed — agent thread exited
+    while let Ok(event) = rx.recv() {
+        let is_terminal = matches!(event, AgentEvent::Done | AgentEvent::Error(_));
+        events.push(event);
+        if is_terminal {
+            break;
         }
     }
     events
