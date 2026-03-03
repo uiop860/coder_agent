@@ -86,7 +86,7 @@ struct SlashCommand {
     description: &'static str,
 }
 
-const SLASH_COMMANDS: &[SlashCommand] = &[
+const SLASH_COMMANDS: [SlashCommand; 4] = [
     SlashCommand {
         name: "/reasoning",
         description: "Toggle reasoning / thinking display",
@@ -112,7 +112,7 @@ struct ModelOption {
     context_window: u64,
 }
 
-const MODELS: &[ModelOption] = &[
+const MODELS: [ModelOption; 4] = [
     ModelOption {
         label: "Nemotron 3 Nano 30B (free)",
         id: "nvidia/nemotron-3-nano-30b-a3b:free",
@@ -759,7 +759,7 @@ fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App
         .filter(|_msg| true)
         .flat_map(|msg| {
             // Determine display content based on show_tools flag
-            let display_content = if matches!(msg.sender, Sender::Tool) && !app.show_tools {
+            let display_content: String = if matches!(msg.sender, Sender::Tool) && !app.show_tools {
                 // When tools are hidden, show only the tool name in minimal form
                 if let Some(ref tool_name) = msg.tool_name {
                     format!("Tool: {}", tool_name)
@@ -814,11 +814,13 @@ fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App
 
             let text_width = inner_width.saturating_sub(2).max(1);
 
-            let content_lines: Vec<Line<'static>> = if matches!(msg.sender, Sender::Agent) {
-                coder_agent::markdown::render_markdown(&display_content, text_width)
+            let display_text = display_content.as_str();
+            let content_lines: Vec<Line<'static>>;
+            if matches!(msg.sender, Sender::Agent) {
+                content_lines = coder_agent::markdown::render_markdown(display_text, text_width);
             } else {
-                render_plain_text(&display_content, text_width, dot_style)
-            };
+                content_lines = render_plain_text(display_text, text_width, dot_style);
+            }
             lines.extend(content_lines);
 
             // Blank separator between messages
