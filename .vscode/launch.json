@@ -13,9 +13,7 @@
           "${workspaceFolder}/Cargo.toml"
         ]
       },
-      "env": {
-        "OPENROUTER_API_KEY": "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"
-      },
+      "envFile": "${workspaceFolder}/.env",
       "args": [],
       "cwd": "${workspaceFolder}",
       "terminal": "external"
