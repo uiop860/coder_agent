@@ -67,26 +67,37 @@ impl Tool for ReplaceLinesTool {
 
         let mut lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
+        let append_at_eof = start == total + 1 && end == total + 1;
 
         if start > total + 1 {
             return Err(format!(
                 "start_line ({start}) is beyond end of file ({total} lines)"
             ));
         }
-        if end > total {
+        if end > total && !append_at_eof {
             return Err(format!(
                 "end_line ({end}) is beyond end of file ({total} lines)"
             ));
         }
 
-        // Replace lines [start-1 .. end] with the new content lines
+        // Replace lines [start-1 .. end] with the new content lines.
+        // Special case: when start == end and new_content is non-empty,
+        // insert before start_line without removing any existing line.
         let replacement: Vec<&str> = if new_content.is_empty() {
             vec![]
         } else {
             new_content.lines().collect()
         };
 
-        lines.splice((start - 1)..end, replacement);
+        let range = if append_at_eof {
+            total..total
+        } else if start == end && !replacement.is_empty() {
+            (start - 1)..(start - 1)
+        } else {
+            (start - 1)..end
+        };
+
+        lines.splice(range, replacement);
 
         // Preserve trailing newline if original had one
         let mut result = lines.join("\n");
