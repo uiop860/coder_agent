@@ -10,8 +10,9 @@ use coder_agent::tools;
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    layout::{Constraint, Direction, Layout, Margin, Position, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Position, Rect, Spacing},
     style::{Color, Modifier, Style},
+    symbols::merge::MergeStrategy,
     text::{Line, Span},
     widgets::{
         Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
@@ -210,6 +211,8 @@ struct App {
     displayed_input_tokens: u64,
     /// Animated display value for output tokens (scrolls toward total_output_tokens each frame).
     displayed_output_tokens: u64,
+    /// Frame counter used to drive the input-border pulse animation while streaming.
+    pulse_tick: u64,
 }
 
 impl App {
@@ -251,6 +254,7 @@ impl App {
             last_input_tokens: 0,
             displayed_input_tokens: 0,
             displayed_output_tokens: 0,
+            pulse_tick: 0,
         }
     }
 
@@ -607,7 +611,9 @@ impl App {
     /// Advance animated display values one step toward their targets.
     /// Uses geometric easing: step = max(1, diff / 4) so it closes ~75% of
     /// the remaining gap each frame (~250 ms to settle at 60 fps).
+    /// Also advances the pulse animation counter.
     fn tick_token_animation(&mut self) {
+        self.pulse_tick = self.pulse_tick.wrapping_add(1);
         let step_in = ((self
             .total_input_tokens
             .saturating_sub(self.displayed_input_tokens))
@@ -682,25 +688,26 @@ fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(3),
             Constraint::Min(0),
             Constraint::Length(3),
-            Constraint::Length(3),
         ])
+        .spacing(Spacing::Overlap(1))
         .split(frame.area());
 
+    // Render status bar at the top
+    render_status_bar(frame, chunks[0], app);
+
     // Render messages area
-    render_messages(frame, chunks[0], app);
+    render_messages(frame, chunks[1], app);
 
     // Render slash-command popover (above input, when active)
     if app.slash_mode || app.slash_model_mode {
-        render_slash_popover(frame, chunks[1], app);
+        render_slash_popover(frame, chunks[2], app);
     }
 
     // Render input area
-    render_input(frame, chunks[1], app);
-
-    // Render status bar
-    render_status_bar(frame, chunks[2], app);
+    render_input(frame, chunks[2], app);
 }
 
 fn render_plain_text(content: &str, text_width: usize, dot_style: Style) -> Vec<Line<'static>> {
@@ -829,7 +836,8 @@ fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Messages (↑/↓ to scroll)"),
+                .title("Messages (↑/↓ to scroll)")
+                .merge_borders(MergeStrategy::Exact),
         )
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
@@ -961,17 +969,73 @@ fn render_input(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     } else {
         "Input"
     };
-    let style = if app.streaming {
-        Style::default().fg(Color::DarkGray)
+
+    if app.streaming {
+        // Render the block normally first (lays out title text and clears interior).
+        let input_widget = Paragraph::new(input_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .merge_borders(MergeStrategy::Exact),
+            )
+            .style(Style::default().fg(Color::White));
+        frame.render_widget(input_widget, area);
+
+        // Overpaint each border cell with a per-cell wave color so the highlight
+        // travels clockwise around the border.  We do this in its own block so
+        // the &mut Buffer borrow is dropped before the set_cursor_position call.
+        if area.width >= 2 && area.height >= 2 {
+            let w = area.width as usize;
+            let h = area.height as usize;
+            let total = 2 * (w + h - 2); // total border cells
+            // One full revolution every 120 frames (~2 s at 60 fps).
+            let time_frac = (app.pulse_tick % 120) as f64 / 120.0;
+
+            // Map a perimeter index to a cool wave color (cyan → indigo → cyan).
+            let color_at = |i: usize| -> Color {
+                let phase = (i as f64 / total as f64 + time_frac) % 1.0;
+                let t = (std::f64::consts::TAU * phase).cos().mul_add(-0.5, 0.5);
+                let r = (t * 110.0) as u8;
+                let g = (220.0_f64 - t * 180.0) as u8;
+                Color::Rgb(r, g, 255)
+            };
+
+            let buf = frame.buffer_mut();
+            let mut idx = 0usize;
+
+            // Top row: left → right
+            for x in 0..w as u16 {
+                buf[(area.x + x, area.y)].set_fg(color_at(idx));
+                idx += 1;
+            }
+            // Right column: top+1 → bottom-1
+            for y in 1..(h - 1) as u16 {
+                buf[(area.x + area.width - 1, area.y + y)].set_fg(color_at(idx));
+                idx += 1;
+            }
+            // Bottom row: right → left
+            for x in (0..w as u16).rev() {
+                buf[(area.x + x, area.y + area.height - 1)].set_fg(color_at(idx));
+                idx += 1;
+            }
+            // Left column: bottom-1 → top+1
+            for y in (1..(h - 1) as u16).rev() {
+                buf[(area.x, area.y + y)].set_fg(color_at(idx));
+                idx += 1;
+            }
+        }
     } else {
-        Style::default().fg(Color::Yellow)
-    };
-
-    let input_widget = Paragraph::new(input_text)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .style(style);
-
-    frame.render_widget(input_widget, area);
+        let input_widget = Paragraph::new(input_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .merge_borders(MergeStrategy::Exact),
+            )
+            .style(Style::default().fg(Color::Rgb(130, 60, 255)));
+        frame.render_widget(input_widget, area);
+    }
 
     // Set cursor position in the input area.
     // Skip while animating or streaming: ratatui moves the physical terminal
@@ -1046,8 +1110,12 @@ fn render_status_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) 
         ),
     ]);
 
-    let widget =
-        Paragraph::new(vec![line]).block(Block::default().borders(Borders::ALL).title("Session"));
+    let widget = Paragraph::new(vec![line]).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Session")
+            .merge_borders(MergeStrategy::Exact),
+    );
     frame.render_widget(widget, area);
 }
 
