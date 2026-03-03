@@ -747,7 +747,7 @@ fn render_plain_text(content: &str, text_width: usize, dot_style: Style) -> Vec<
     }
     lines
 }
-
+// test
 fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App) {
     let inner_width = area.width.saturating_sub(2) as usize; // subtract borders
     let visible_height = area.height.saturating_sub(2) as usize; // subtract borders

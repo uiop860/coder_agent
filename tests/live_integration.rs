@@ -136,7 +136,10 @@ fn test_live_tool_call_list_directory() {
         match event {
             AgentEvent::Token(t) => print!("{}", t),
             AgentEvent::ToolCall(tc) => {
-                println!("\n[ToolCall] name={} id={} args={}", tc.name, tc.id, tc.arguments)
+                println!(
+                    "\n[ToolCall] name={} id={} args={}",
+                    tc.name, tc.id, tc.arguments
+                )
             }
             AgentEvent::ToolCallResult { info, output } => {
                 println!("[ToolResult] {}  →  {} chars", info.name, output.len())
@@ -157,7 +160,9 @@ fn test_live_tool_call_list_directory() {
         "expected a ToolCall event — the model did not call any tool"
     );
     assert!(
-        events.iter().any(|e| matches!(e, AgentEvent::ToolCallResult { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolCallResult { .. })),
         "expected a ToolCallResult event — tool was not executed"
     );
 

@@ -55,6 +55,10 @@ impl Tool for WriteFileTool {
         fs::write(file_path, content)
             .map_err(|e| format!("Failed to write file '{}': {}", path, e))?;
 
-        Ok(format!("Successfully wrote {} bytes to '{}'", content.len(), path))
+        Ok(format!(
+            "Successfully wrote {} bytes to '{}'",
+            content.len(),
+            path
+        ))
     }
 }

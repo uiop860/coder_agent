@@ -1,5 +1,5 @@
 use crate::tools::{Tool, ToolDefinition};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 
 pub struct StrReplaceTool;
@@ -44,8 +44,8 @@ impl Tool for StrReplaceTool {
             .as_str()
             .ok_or("Missing required parameter: new_str")?;
 
-        let content = fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read '{path}': {e}"))?;
+        let content =
+            fs::read_to_string(path).map_err(|e| format!("Failed to read '{path}': {e}"))?;
 
         let count = content.matches(old_str).count();
 
@@ -65,8 +65,7 @@ impl Tool for StrReplaceTool {
 
         let new_content = content.replacen(old_str, new_str, 1);
 
-        fs::write(path, new_content)
-            .map_err(|e| format!("Failed to write '{path}': {e}"))?;
+        fs::write(path, new_content).map_err(|e| format!("Failed to write '{path}': {e}"))?;
 
         Ok(format!(
             "Replaced at line {line_number} in '{path}'. Verify with read_file if needed."

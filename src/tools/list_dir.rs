@@ -27,10 +27,7 @@ impl Tool for ListDirTool {
         let args: serde_json::Value = serde_json::from_str(arguments)
             .map_err(|e| format!("Failed to parse arguments: {}", e))?;
 
-        let path_str = args
-            .get("path")
-            .and_then(|p| p.as_str())
-            .unwrap_or(".");
+        let path_str = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
 
         let dir_path = Path::new(path_str);
 

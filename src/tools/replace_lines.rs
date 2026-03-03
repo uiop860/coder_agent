@@ -1,5 +1,5 @@
 use crate::tools::{Tool, ToolDefinition};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 
 pub struct ReplaceLinesTool;
@@ -42,7 +42,9 @@ impl Tool for ReplaceLinesTool {
         let args: Value = serde_json::from_str(arguments)
             .map_err(|e| format!("Failed to parse arguments: {e}"))?;
 
-        let path = args["path"].as_str().ok_or("Missing required parameter: path")?;
+        let path = args["path"]
+            .as_str()
+            .ok_or("Missing required parameter: path")?;
         let start = args["start_line"]
             .as_u64()
             .ok_or("Missing required parameter: start_line")? as usize;
@@ -60,8 +62,8 @@ impl Tool for ReplaceLinesTool {
             return Err(format!("end_line ({end}) must be >= start_line ({start})"));
         }
 
-        let content = fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read '{path}': {e}"))?;
+        let content =
+            fs::read_to_string(path).map_err(|e| format!("Failed to read '{path}': {e}"))?;
 
         let mut lines: Vec<&str> = content.lines().collect();
         let total = lines.len();

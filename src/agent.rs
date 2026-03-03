@@ -17,7 +17,10 @@ fn run_one_llm_pass(
     config: &RequestConfig,
     tx: &Sender<AgentEvent>,
 ) -> Result<(Vec<ToolCallInfo>, String), String> {
-    debug!("run_one_llm_pass: starting with {} messages", messages.len());
+    debug!(
+        "run_one_llm_pass: starting with {} messages",
+        messages.len()
+    );
     let rx = provider.stream(messages.to_vec(), config);
     let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
     let mut text = String::new();
@@ -32,14 +35,19 @@ fn run_one_llm_pass(
                 let _ = tx.send(AgentEvent::ReasoningToken(t));
             }
             Ok(AgentEvent::ToolCall(tc)) => {
-                info!("run_one_llm_pass: tool call received — name={} id={} args={}",
-                    tc.name, tc.id, tc.arguments);
+                info!(
+                    "run_one_llm_pass: tool call received — name={} id={} args={}",
+                    tc.name, tc.id, tc.arguments
+                );
                 let _ = tx.send(AgentEvent::ToolCall(tc.clone()));
                 tool_calls.push(tc);
             }
             Ok(AgentEvent::Done) => {
-                debug!("run_one_llm_pass: Done — {} tool call(s), {} text chars",
-                    tool_calls.len(), text.len());
+                debug!(
+                    "run_one_llm_pass: Done — {} tool call(s), {} text chars",
+                    tool_calls.len(),
+                    text.len()
+                );
                 return Ok((tool_calls, text));
             }
             Ok(AgentEvent::Error(e)) => {
@@ -50,9 +58,15 @@ fn run_one_llm_pass(
             Ok(AgentEvent::ToolCallResult { .. }) => {
                 // Should not come from provider; ignore.
             }
-            Ok(AgentEvent::Usage { input_tokens, output_tokens }) => {
+            Ok(AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+            }) => {
                 // Forward usage stats to the TUI.
-                let _ = tx.send(AgentEvent::Usage { input_tokens, output_tokens });
+                let _ = tx.send(AgentEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                });
             }
             Err(_) => {
                 error!("run_one_llm_pass: provider channel closed unexpectedly");
@@ -75,12 +89,19 @@ pub fn agent_stream(
     let (tx, rx) = mpsc::channel();
 
     std::thread::spawn(move || {
-        info!("agent_stream: starting — {} initial message(s), {} tool(s) registered",
-            initial_messages.len(), config.tools.len());
+        info!(
+            "agent_stream: starting — {} initial message(s), {} tool(s) registered",
+            initial_messages.len(),
+            config.tools.len()
+        );
 
         let mut messages = initial_messages;
         for iteration in 0..MAX_ITERATIONS {
-            debug!("agent_stream: iteration {} / {}", iteration + 1, MAX_ITERATIONS);
+            debug!(
+                "agent_stream: iteration {} / {}",
+                iteration + 1,
+                MAX_ITERATIONS
+            );
 
             let (tool_calls, _text) = match run_one_llm_pass(&*provider, &messages, &config, &tx) {
                 Ok(r) => r,
@@ -103,27 +124,32 @@ pub fn agent_stream(
 
             // Execute each tool and append results
             for tc in &tool_calls {
-                info!("agent_stream: executing tool '{}' (id={}) args={}",
-                    tc.name, tc.id, tc.arguments);
+                info!(
+                    "agent_stream: executing tool '{}' (id={}) args={}",
+                    tc.name, tc.id, tc.arguments
+                );
 
                 let result = config
                     .tools
                     .iter()
                     .find(|t| t.definition().name == tc.name)
                     .map(|t| {
-                        t.execute(&tc.arguments)
-                            .unwrap_or_else(|e| {
-                                warn!("agent_stream: tool '{}' returned error — {}", tc.name, e);
-                                format!("Error: {}", e)
-                            })
+                        t.execute(&tc.arguments).unwrap_or_else(|e| {
+                            warn!("agent_stream: tool '{}' returned error — {}", tc.name, e);
+                            format!("Error: {}", e)
+                        })
                     })
                     .unwrap_or_else(|| {
                         warn!("agent_stream: unknown tool '{}'", tc.name);
                         format!("Unknown tool: {}", tc.name)
                     });
 
-                debug!("agent_stream: tool '{}' result ({} chars):\n{}",
-                    tc.name, result.len(), result);
+                debug!(
+                    "agent_stream: tool '{}' result ({} chars):\n{}",
+                    tc.name,
+                    result.len(),
+                    result
+                );
 
                 let _ = tx.send(AgentEvent::ToolCallResult {
                     info: tc.clone(),
@@ -133,7 +159,10 @@ pub fn agent_stream(
             }
         }
 
-        error!("agent_stream: maximum iterations ({}) reached", MAX_ITERATIONS);
+        error!(
+            "agent_stream: maximum iterations ({}) reached",
+            MAX_ITERATIONS
+        );
         let _ = tx.send(AgentEvent::Error("Maximum iterations reached".to_string()));
     });
 

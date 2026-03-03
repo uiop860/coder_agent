@@ -36,10 +36,7 @@ impl Tool for SearchFileTool {
             .and_then(|p| p.as_str())
             .ok_or_else(|| "Missing or invalid 'pattern' parameter".to_string())?;
 
-        let root_str = args
-            .get("root")
-            .and_then(|r| r.as_str())
-            .unwrap_or(".");
+        let root_str = args.get("root").and_then(|r| r.as_str()).unwrap_or(".");
 
         let root = Path::new(root_str);
 

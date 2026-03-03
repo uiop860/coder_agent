@@ -30,11 +30,7 @@ fn test_simple_query_no_code() {
         AgentEvent::Done,
     ]]);
 
-    let rx = agent_stream(
-        Arc::new(provider),
-        vec![ChatMessage::user("Hello")],
-        cfg(),
-    );
+    let rx = agent_stream(Arc::new(provider), vec![ChatMessage::user("Hello")], cfg());
     let events = collect_events(rx);
 
     assert!(
@@ -84,10 +80,7 @@ fn test_single_tool_use_cycle() {
 
     let provider = MockProvider::new(vec![
         // First pass: tool call
-        vec![
-            AgentEvent::ToolCall(tool_call.clone()),
-            AgentEvent::Done,
-        ],
+        vec![AgentEvent::ToolCall(tool_call.clone()), AgentEvent::Done],
         // Second pass: plain text response after tool result
         vec![
             AgentEvent::Token("The file contains package metadata.".to_string()),
