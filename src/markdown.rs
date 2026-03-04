@@ -1,9 +1,27 @@
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd, TextMergeStream};
+use pulldown_cmark::{
+    CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd, TextMergeStream,
+};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use std::sync::OnceLock;
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{FontStyle, Theme, ThemeSet};
+use syntect::parsing::SyntaxSet;
+use syntect::util::LinesWithEndings;
 use unicode_width::UnicodeWidthStr;
+
+static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+static THEME: OnceLock<Theme> = OnceLock::new();
+
+fn syntax_set() -> &'static SyntaxSet {
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+fn highlight_theme() -> &'static Theme {
+    THEME.get_or_init(|| ThemeSet::load_defaults().themes["base16-ocean.dark"].clone())
+}
 
 #[derive(Clone, Copy, Debug)]
 enum StyleModifier {
@@ -37,6 +55,9 @@ struct MdRenderer {
     // Table state
     table_rows: Vec<TableRow>, // (is_header, cells)
     table_current_cells: Vec<TableCell>,
+    // Code block state
+    code_block_lang: Option<String>,
+    code_block_buf: String,
 }
 
 impl MdRenderer {
@@ -53,6 +74,8 @@ impl MdRenderer {
             text_width,
             table_rows: Vec::new(),
             table_current_cells: Vec::new(),
+            code_block_lang: None,
+            code_block_buf: String::new(),
         }
     }
 
@@ -130,19 +153,49 @@ impl MdRenderer {
         }
     }
 
-    fn emit_code_line(&mut self, line: &str) {
-        let max_code_width = self.text_width.saturating_sub(2);
-        let truncated = truncate_to_cols(line, max_code_width);
-        let prefix = if !self.first_line_emitted {
-            self.first_line_emitted = true;
-            Span::styled("● ", Style::default().fg(Color::White))
-        } else {
-            Span::raw("  ")
-        };
-        self.output.push(Line::from(vec![
-            prefix,
-            Span::styled(truncated, Style::default().fg(Color::DarkGray)),
-        ]));
+    fn flush_code_block(&mut self) {
+        let ss = syntax_set();
+        let theme = highlight_theme();
+        let max_w = self.text_width.saturating_sub(2);
+
+        let syntax = self
+            .code_block_lang
+            .as_deref()
+            .and_then(|lang| ss.find_syntax_by_token(lang))
+            .unwrap_or_else(|| ss.find_syntax_plain_text());
+
+        let mut h = HighlightLines::new(syntax, theme);
+
+        for line in LinesWithEndings::from(&self.code_block_buf) {
+            let bare = line.trim_end_matches('\n');
+            let truncated = truncate_to_cols(bare, max_w);
+
+            let prefix = Span::raw("  ");
+
+            let highlight_input = format!("{}\n", truncated);
+            let ranges = h.highlight_line(&highlight_input, ss).unwrap_or_default();
+
+            let mut spans = vec![prefix];
+            for (hl_style, text) in ranges {
+                if text.is_empty() || text == "\n" {
+                    continue;
+                }
+                let fg = Color::Rgb(
+                    hl_style.foreground.r,
+                    hl_style.foreground.g,
+                    hl_style.foreground.b,
+                );
+                let mut ratatui_style = Style::default().fg(fg);
+                if hl_style.font_style.contains(FontStyle::BOLD) {
+                    ratatui_style = ratatui_style.add_modifier(Modifier::BOLD);
+                }
+                if hl_style.font_style.contains(FontStyle::ITALIC) {
+                    ratatui_style = ratatui_style.add_modifier(Modifier::ITALIC);
+                }
+                spans.push(Span::styled(text.to_string(), ratatui_style));
+            }
+            self.output.push(Line::from(spans));
+        }
     }
 
     fn render_table(&mut self) {
@@ -276,11 +329,22 @@ impl MdRenderer {
                 self.flush_inline(Some(heading_style), PrefixKind::Normal);
                 self.output.push(Line::from(Span::raw("")));
             }
-            Event::Start(Tag::CodeBlock(_)) => {
+            Event::Start(Tag::CodeBlock(kind)) => {
                 self.in_code_block = true;
+                self.code_block_lang = match kind {
+                    CodeBlockKind::Fenced(lang) => {
+                        let s = lang.trim().to_string();
+                        if s.is_empty() { None } else { Some(s) }
+                    }
+                    CodeBlockKind::Indented => None,
+                };
+                self.code_block_buf.clear();
             }
             Event::End(TagEnd::CodeBlock) => {
+                self.flush_code_block();
                 self.in_code_block = false;
+                self.code_block_lang = None;
+                self.code_block_buf.clear();
                 self.output.push(Line::from(Span::raw("")));
             }
             Event::Start(Tag::BlockQuote(_)) => {
@@ -362,9 +426,7 @@ impl MdRenderer {
             // ── Inline content ───────────────────────────────────────────────
             Event::Text(s) => {
                 if self.in_code_block {
-                    for line in s.lines() {
-                        self.emit_code_line(line);
-                    }
+                    self.code_block_buf.push_str(&s);
                 } else {
                     let style = self.effective_style();
                     self.inline_buf.push((s.into_string(), style));

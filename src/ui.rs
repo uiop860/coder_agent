@@ -192,6 +192,22 @@ pub fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut
             };
             lines.extend(content_lines);
 
+            // For replace_lines tool calls, render the diff preview with colour.
+            // Always shown regardless of the show_tools toggle.
+            if matches!(msg.sender, Sender::Tool)
+                && let Some(ref diff_text) = msg.diff_preview {
+                    for diff_line in diff_text.lines() {
+                        let style = if diff_line.starts_with("+ ") {
+                            Style::default().fg(Color::Green)
+                        } else if diff_line.starts_with("- ") {
+                            Style::default().fg(Color::Red)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        };
+                        lines.push(Line::from(Span::styled(diff_line.to_string(), style)));
+                    }
+                }
+
             // Blank separator between messages
             lines.push(Line::from(Span::raw("")));
             lines
@@ -432,13 +448,16 @@ fn render_input(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
 fn render_approval_dialog(frame: &mut Frame, area: Rect, info: &coder_agent::client::ToolCallInfo) {
     let w = (area.width * 6 / 10).max(40).min(area.width);
     let h = 7u16;
+
     let popup = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
         area.y + (area.height.saturating_sub(h)) / 2,
         w,
         h,
     );
+
     let args_display = truncate_at_char_boundary(&info.arguments, 60);
+
     let text = vec![
         Line::from(""),
         Line::from(Span::styled(
@@ -457,6 +476,7 @@ fn render_approval_dialog(frame: &mut Frame, area: Rect, info: &coder_agent::cli
             Style::default().fg(Color::Cyan),
         )),
     ];
+
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(text).block(

@@ -1,17 +1,112 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
 
 use log::{debug, error, info, warn};
 
 use crate::client::{AgentEvent, ChatMessage, Provider, RequestConfig, ToolCallInfo};
 
 const MAX_ITERATIONS: usize = 10;
+const MAX_RETRIES: u32 = 3;
 
-/// Run one LLM streaming pass.
-///
-/// Content tokens / reasoning tokens are forwarded straight to the TUI via `tx`.
-/// Returns the list of tool calls and any text generated.
+enum PassError {
+    Cancelled,
+    /// Transient failure before any tokens were emitted — safe to retry.
+    Retryable(String),
+    /// Non-retryable failure, or error that occurred after tokens were emitted.
+    Fatal(String),
+}
+
+/// Returns true for errors that are worth retrying: rate limits, server errors,
+/// and network-level failures.  Client errors (4xx except 429) are not retried.
+fn is_retryable_error(e: &str) -> bool {
+    if let Some(rest) = e.strip_prefix("HTTP ") {
+        // "HTTP 429 …" → rate limited
+        // "HTTP 5xx …" → server error
+        rest.starts_with("429") || rest.starts_with('5')
+    } else {
+        // reqwest network errors, channel-closed, etc.
+        true
+    }
+}
+
+/// One attempt at an LLM streaming pass.  Does NOT retry on its own.
+/// Classifies errors as Retryable only when no tokens have been forwarded yet
+/// (so the TUI has not started rendering a partial response).
+fn try_llm_pass(
+    provider: &dyn Provider,
+    messages: &[ChatMessage],
+    config: &RequestConfig,
+    tx: &Sender<AgentEvent>,
+    cancel: &AtomicBool,
+) -> Result<(Vec<ToolCallInfo>, String), PassError> {
+    let rx = provider.stream(messages.to_vec(), config);
+    let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
+    let mut text = String::new();
+    let mut tokens_emitted = false;
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(PassError::Cancelled);
+        }
+        match rx.recv() {
+            Ok(AgentEvent::Token(t)) => {
+                tokens_emitted = true;
+                text.push_str(&t);
+                let _ = tx.send(AgentEvent::Token(t));
+            }
+            Ok(AgentEvent::ReasoningToken(t)) => {
+                tokens_emitted = true;
+                let _ = tx.send(AgentEvent::ReasoningToken(t));
+            }
+            Ok(AgentEvent::ToolCall(tc)) => {
+                info!(
+                    "try_llm_pass: tool call received — name={} id={} args={}",
+                    tc.name, tc.id, tc.arguments
+                );
+                let _ = tx.send(AgentEvent::ToolCall(tc.clone()));
+                tool_calls.push(tc);
+            }
+            Ok(AgentEvent::Done) => {
+                debug!(
+                    "try_llm_pass: Done — {} tool call(s), {} text chars",
+                    tool_calls.len(),
+                    text.len()
+                );
+                return Ok((tool_calls, text));
+            }
+            Ok(AgentEvent::Error(e)) => {
+                error!("try_llm_pass: provider error — {}", e);
+                if !tokens_emitted && is_retryable_error(&e) {
+                    return Err(PassError::Retryable(e));
+                }
+                return Err(PassError::Fatal(e));
+            }
+            Ok(AgentEvent::ToolCallResult { .. }) | Ok(AgentEvent::ToolApprovalRequest { .. }) => {}
+            Ok(AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+            }) => {
+                let _ = tx.send(AgentEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                });
+            }
+            Err(_) => {
+                error!("try_llm_pass: provider channel closed unexpectedly");
+                let e = "provider channel closed unexpectedly".to_string();
+                if !tokens_emitted {
+                    return Err(PassError::Retryable(e));
+                }
+                return Err(PassError::Fatal(e));
+            }
+        }
+    }
+}
+
+/// Run one LLM streaming pass, retrying up to MAX_RETRIES times on transient
+/// errors with exponential backoff (1 s → 2 s → 4 s).
 fn run_one_llm_pass(
     provider: &dyn Provider,
     messages: &[ChatMessage],
@@ -23,62 +118,36 @@ fn run_one_llm_pass(
         "run_one_llm_pass: starting with {} messages",
         messages.len()
     );
-    let rx = provider.stream(messages.to_vec(), config);
-    let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
-    let mut text = String::new();
 
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("cancelled".to_string());
-        }
-        match rx.recv() {
-            Ok(AgentEvent::Token(t)) => {
-                text.push_str(&t);
-                let _ = tx.send(AgentEvent::Token(t));
-            }
-            Ok(AgentEvent::ReasoningToken(t)) => {
-                let _ = tx.send(AgentEvent::ReasoningToken(t));
-            }
-            Ok(AgentEvent::ToolCall(tc)) => {
-                info!(
-                    "run_one_llm_pass: tool call received — name={} id={} args={}",
-                    tc.name, tc.id, tc.arguments
+    for attempt in 0..=MAX_RETRIES {
+        match try_llm_pass(provider, messages, config, tx, cancel) {
+            Ok(result) => return Ok(result),
+            Err(PassError::Cancelled) => return Err("cancelled".to_string()),
+            Err(PassError::Retryable(e)) if attempt < MAX_RETRIES => {
+                let delay = Duration::from_secs(2u64.pow(attempt));
+                warn!(
+                    "run_one_llm_pass: retryable error (attempt {}/{}) in {}s — {}",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    delay.as_secs(),
+                    e
                 );
-                let _ = tx.send(AgentEvent::ToolCall(tc.clone()));
-                tool_calls.push(tc);
+                let _ = tx.send(AgentEvent::Token(format!(
+                    "\n*(Retrying in {}s — {})*\n",
+                    delay.as_secs(),
+                    e
+                )));
+                std::thread::sleep(delay);
             }
-            Ok(AgentEvent::Done) => {
-                debug!(
-                    "run_one_llm_pass: Done — {} tool call(s), {} text chars",
-                    tool_calls.len(),
-                    text.len()
-                );
-                return Ok((tool_calls, text));
-            }
-            Ok(AgentEvent::Error(e)) => {
-                error!("run_one_llm_pass: provider error — {}", e);
+            Err(PassError::Retryable(e)) | Err(PassError::Fatal(e)) => {
+                error!("run_one_llm_pass: giving up — {}", e);
                 let _ = tx.send(AgentEvent::Error(e.clone()));
                 return Err(e);
             }
-            Ok(AgentEvent::ToolCallResult { .. }) | Ok(AgentEvent::ToolApprovalRequest { .. }) => {
-                // Should not come from provider; ignore.
-            }
-            Ok(AgentEvent::Usage {
-                input_tokens,
-                output_tokens,
-            }) => {
-                // Forward usage stats to the TUI.
-                let _ = tx.send(AgentEvent::Usage {
-                    input_tokens,
-                    output_tokens,
-                });
-            }
-            Err(_) => {
-                error!("run_one_llm_pass: provider channel closed unexpectedly");
-                return Err("provider channel closed unexpectedly".to_string());
-            }
         }
     }
+
+    unreachable!()
 }
 
 /// Start an agentic LLM loop on a new OS thread.

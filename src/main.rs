@@ -85,6 +85,7 @@ mod tests {
             reasoning: String::new(),
             tool_call: None,
             tool_name: Some("list_directory".into()),
+            diff_preview: None,
         });
         app.show_tools = false; // toggle off
         terminal
@@ -112,6 +113,7 @@ mod tests {
             reasoning: String::new(),
             tool_call: Some(tc.clone()),
             tool_name: Some("list_directory".into()),
+            diff_preview: None,
         });
         app.messages.push(Message {
             sender: Sender::Tool,
@@ -119,6 +121,7 @@ mod tests {
             reasoning: String::new(),
             tool_call: None,
             tool_name: Some("list_directory".into()),
+            diff_preview: None,
         });
 
         // Should render without panic and produce lines containing tool info
@@ -156,6 +159,7 @@ mod tests {
             reasoning: String::new(),
             tool_call: Some(tc),
             tool_name: Some("list_directory".into()),
+            diff_preview: None,
         });
 
         // With show_tools = true, tool should show full details

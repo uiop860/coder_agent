@@ -99,9 +99,10 @@ The sub-agent runs to completion and its final response is returned as the tool 
                         arguments: tc.arguments.clone(),
                     };
                     if let Ok(guard) = self.progress_tx.lock()
-                        && let Some(tx) = guard.as_ref() {
-                            let _ = tx.send(AgentEvent::ToolCall(prefixed));
-                        }
+                        && let Some(tx) = guard.as_ref()
+                    {
+                        let _ = tx.send(AgentEvent::ToolCall(prefixed));
+                    }
                 }
                 Ok(AgentEvent::ToolCallResult { info, output }) => {
                     let prefixed_info = ToolCallInfo {
@@ -110,12 +111,13 @@ The sub-agent runs to completion and its final response is returned as the tool 
                         arguments: info.arguments.clone(),
                     };
                     if let Ok(guard) = self.progress_tx.lock()
-                        && let Some(tx) = guard.as_ref() {
-                            let _ = tx.send(AgentEvent::ToolCallResult {
-                                info: prefixed_info,
-                                output,
-                            });
-                        }
+                        && let Some(tx) = guard.as_ref()
+                    {
+                        let _ = tx.send(AgentEvent::ToolCallResult {
+                            info: prefixed_info,
+                            output,
+                        });
+                    }
                 }
                 Ok(AgentEvent::Done) => break,
                 Ok(AgentEvent::Error(e)) => return Err(format!("Sub-agent error: {}", e)),

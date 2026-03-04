@@ -36,6 +36,7 @@ impl App {
                 reasoning: String::new(),
                 tool_call: None,
                 tool_name: None,
+                diff_preview: None,
             }],
             history: Vec::new(),
             input_buffer: String::new(),
@@ -78,6 +79,7 @@ impl App {
             reasoning: String::new(),
             tool_call: None,
             tool_name: None,
+            diff_preview: None,
         });
         // Add to API history
         self.history.push(ChatMessage::user(text));
@@ -88,6 +90,7 @@ impl App {
             reasoning: String::new(),
             tool_call: None,
             tool_name: None,
+            diff_preview: None,
         });
 
         if let Some(provider) = self.provider.clone() {
@@ -139,12 +142,18 @@ impl App {
             match ev {
                 AgentEvent::ToolCall(tc) => {
                     let tool_name = tc.name.clone();
+                    let diff_preview = if tool_name == "replace_lines" {
+                        coder_agent::diff::compute_replace_diff_text(&tc.arguments)
+                    } else {
+                        None
+                    };
                     self.messages.push(Message {
                         sender: Sender::Tool,
                         content: String::new(),
                         reasoning: String::new(),
                         tool_call: Some(tc),
                         tool_name: Some(tool_name),
+                        diff_preview,
                     });
                     self.scroll_to_bottom();
                 }
@@ -165,6 +174,7 @@ impl App {
                             reasoning: String::new(),
                             tool_call: None,
                             tool_name: Some(info.name),
+                            diff_preview: None,
                         });
                     }
                     self.scroll_to_bottom();
@@ -198,6 +208,11 @@ impl App {
                     // Replace the empty Agent placeholder with the tool call message
                     // so there's no blank Agent line above it.
                     let tool_name = tc.name.clone();
+                    let diff_preview = if tool_name == "replace_lines" {
+                        coder_agent::diff::compute_replace_diff_text(&tc.arguments)
+                    } else {
+                        None
+                    };
                     if let Some(last) = self.messages.last_mut()
                         && matches!(last.sender, Sender::Agent)
                         && last.content.is_empty()
@@ -208,6 +223,7 @@ impl App {
                             reasoning: String::new(),
                             tool_call: Some(tc),
                             tool_name: Some(tool_name.clone()),
+                            diff_preview,
                         };
                         self.scroll_to_bottom();
                         continue;
@@ -218,6 +234,7 @@ impl App {
                         reasoning: String::new(),
                         tool_call: Some(tc),
                         tool_name: Some(tool_name),
+                        diff_preview,
                     });
                     self.scroll_to_bottom();
                 }
@@ -241,6 +258,7 @@ impl App {
                             reasoning: String::new(),
                             tool_call: None,
                             tool_name: Some(info.name),
+                            diff_preview: None,
                         });
                     }
                     // Placeholder for the next LLM response
@@ -250,6 +268,7 @@ impl App {
                         reasoning: String::new(),
                         tool_call: None,
                         tool_name: None,
+                        diff_preview: None,
                     });
                     self.scroll_to_bottom();
                 }

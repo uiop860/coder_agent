@@ -30,6 +30,9 @@ pub struct Message {
     /// Preserved tool name for tool result messages (when tool_call is None but
     /// sender is Tool). Used to show minimal tool name when show_tools is false.
     pub tool_name: Option<String>,
+    /// Pre-computed plain-text diff preview (with +/- prefixes) for
+    /// replace_lines calls. Rendered with colour in the messages pane.
+    pub diff_preview: Option<String>,
 }
 
 pub struct App {
