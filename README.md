@@ -28,18 +28,22 @@ if ! command -v cargo >/dev/null 2>&1; then
 	exit 1
 fi
 
+if [ -z "$(git diff --cached --name-only -- '*.rs')" ]; then
+	echo "pre-commit: no staged .rs files, skipping Rust checks"
+	exit 0
+fi
+
 echo "pre-commit: formatting Rust code (cargo fmt --all)"
 cargo fmt --all
 
-# Stage Rust files that were changed by rustfmt.
-git add -u -- '*.rs'
 
 echo "pre-commit: formatting complete"
 
-echo "pre-commit: running lints (cargo clippy --all-targets -- -D warnings)"
-cargo clippy --all-targets -- -D warnings
-echo "pre-commit: clippy checks passed"
+echo "pre-commit: running lints (cargo clippy --all-targets --fix -- -D warnings)"
+cargo clippy --allow-dirty --all-targets --fix -- -D warnings
 
+git add -u -- '*.rs'
+echo "pre-commit: clippy checks passed"
 
 ```
 
