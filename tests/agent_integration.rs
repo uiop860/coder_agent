@@ -33,7 +33,13 @@ fn test_simple_query_no_code() {
 
     let cancel = Arc::new(AtomicBool::new(false));
     let (_, approval_rx) = std::sync::mpsc::channel::<bool>();
-    let rx = agent_stream(Arc::new(provider), vec![ChatMessage::user("Hello")], cfg(), cancel, approval_rx);
+    let rx = agent_stream(
+        Arc::new(provider),
+        vec![ChatMessage::user("Hello")],
+        cfg(),
+        cancel,
+        approval_rx,
+    );
     let events = collect_events(rx);
 
     assert!(

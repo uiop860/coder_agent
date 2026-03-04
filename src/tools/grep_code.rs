@@ -27,12 +27,7 @@ fn glob_matches(filename: &str, glob: &str) -> bool {
     }
 }
 
-fn search_dir(
-    dir: &Path,
-    re: &Regex,
-    glob: Option<&str>,
-    results: &mut Vec<String>,
-) {
+fn search_dir(dir: &Path, re: &Regex, glob: Option<&str>, results: &mut Vec<String>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -49,10 +44,10 @@ fn search_dir(
             }
             search_dir(&path, re, glob, results);
         } else if path.is_file() {
-            if let Some(g) = glob {
-                if !glob_matches(&name, g) {
-                    continue;
-                }
+            if let Some(g) = glob
+                && !glob_matches(&name, g)
+            {
+                continue;
             }
             if is_binary(&path) {
                 continue;
@@ -131,7 +126,11 @@ impl Tool for GrepCodeTool {
             Ok("No matches found.".to_string())
         } else {
             let truncated = if results.len() == MAX_MATCHES {
-                format!("{}\n[truncated at {} matches]", results.join("\n"), MAX_MATCHES)
+                format!(
+                    "{}\n[truncated at {} matches]",
+                    results.join("\n"),
+                    MAX_MATCHES
+                )
             } else {
                 results.join("\n")
             };

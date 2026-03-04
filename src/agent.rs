@@ -164,10 +164,7 @@ pub fn agent_stream(
                     match approval_rx.recv() {
                         Ok(true) => { /* approved, proceed */ }
                         Ok(false) | Err(_) => {
-                            info!(
-                                "agent_stream: tool '{}' denied by user",
-                                tc.name
-                            );
+                            info!("agent_stream: tool '{}' denied by user", tc.name);
                             let _ = tx.send(AgentEvent::ToolCallResult {
                                 info: tc.clone(),
                                 output: "Tool execution denied by user.".to_string(),
