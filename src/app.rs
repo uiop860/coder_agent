@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -19,8 +19,14 @@ impl App {
         } else {
             "⚠ No OPENROUTER_API_KEY found. Set it and restart.".to_string()
         };
+        let subagent_progress_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<AgentEvent>>>> =
+            Arc::new(Mutex::new(None));
         let config = RequestConfig {
-            tools: tools::default_tools(),
+            tools: if let Some(ref p) = provider {
+                tools::orchestrator_tools(p.clone(), subagent_progress_tx.clone())
+            } else {
+                tools::default_tools()
+            },
             ..RequestConfig::default()
         };
         Self {
@@ -58,6 +64,8 @@ impl App {
             cancel: None,
             approval_tx: None,
             approval_pending: None,
+            subagent_progress_tx,
+            subagent_rx: None,
         }
     }
 
@@ -87,6 +95,12 @@ impl App {
             self.cancel = Some(cancel_flag.clone());
             let (approval_tx, approval_rx) = std::sync::mpsc::channel::<bool>();
             self.approval_tx = Some(approval_tx);
+            // Set up the sub-agent progress side-channel.
+            let (sub_tx, sub_rx) = std::sync::mpsc::channel::<AgentEvent>();
+            if let Ok(mut slot) = self.subagent_progress_tx.lock() {
+                *slot = Some(sub_tx);
+            }
+            self.subagent_rx = Some(sub_rx);
             self.rx = Some(agent_stream(
                 provider,
                 self.history.clone(),
@@ -104,11 +118,68 @@ impl App {
         }
     }
 
+    /// Drain pending sub-agent progress events (ToolCall / ToolCallResult forwarded
+    /// by InvokeSubagentTool while the main agent is blocked executing it).
+    fn drain_subagent_events(&mut self) {
+        // Collect events without holding a borrow on self.
+        let events: Vec<AgentEvent> = match &self.subagent_rx {
+            None => return,
+            Some(rx) => {
+                let mut buf = Vec::new();
+                loop {
+                    match rx.try_recv() {
+                        Ok(ev) => buf.push(ev),
+                        Err(_) => break,
+                    }
+                }
+                buf
+            }
+        };
+        for ev in events {
+            match ev {
+                AgentEvent::ToolCall(tc) => {
+                    let tool_name = tc.name.clone();
+                    self.messages.push(Message {
+                        sender: Sender::Tool,
+                        content: String::new(),
+                        reasoning: String::new(),
+                        tool_call: Some(tc),
+                        tool_name: Some(tool_name),
+                    });
+                    self.scroll_to_bottom();
+                }
+                AgentEvent::ToolCallResult { info, output } => {
+                    let merged = self.messages.iter_mut().rev().find(|m| {
+                        matches!(m.sender, Sender::Tool)
+                            && m.tool_call
+                                .as_ref()
+                                .map(|tc| tc.id == info.id)
+                                .unwrap_or(false)
+                    });
+                    if let Some(msg) = merged {
+                        msg.content = output;
+                    } else {
+                        self.messages.push(Message {
+                            sender: Sender::Tool,
+                            content: output,
+                            reasoning: String::new(),
+                            tool_call: None,
+                            tool_name: Some(info.name),
+                        });
+                    }
+                    self.scroll_to_bottom();
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Drain pending events from the active stream. Call once per frame.
     pub fn poll_stream(&mut self) {
         if self.rx.is_none() {
             return;
         }
+        self.drain_subagent_events();
         loop {
             match self.rx.as_ref().unwrap().try_recv() {
                 Ok(AgentEvent::Token(t)) => {
@@ -202,6 +273,7 @@ impl App {
                     self.cancel = None;
                     self.approval_tx = None;
                     self.approval_pending = None;
+                    self.subagent_rx = None;
                     break;
                 }
                 Ok(AgentEvent::Usage {
@@ -221,6 +293,7 @@ impl App {
                     self.cancel = None;
                     self.approval_tx = None;
                     self.approval_pending = None;
+                    self.subagent_rx = None;
                     break;
                 }
                 Err(_) => break, // no more events right now
@@ -368,6 +441,7 @@ impl App {
                     self.cancel = None;
                     self.approval_tx = None;
                     self.approval_pending = None;
+                    self.subagent_rx = None;
                     if let Some(last) = self.messages.last_mut()
                         && matches!(last.sender, Sender::Agent)
                         && last.content.is_empty()

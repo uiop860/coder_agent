@@ -33,8 +33,24 @@ pub fn default_tools() -> Vec<Arc<dyn Tool>> {
     ]
 }
 
+/// Tools for the main orchestrator agent — includes invoke_subagent.
+pub fn orchestrator_tools(
+    provider: Arc<dyn crate::client::Provider>,
+    progress_tx: std::sync::Arc<
+        std::sync::Mutex<Option<std::sync::mpsc::Sender<crate::client::AgentEvent>>>,
+    >,
+) -> Vec<Arc<dyn Tool>> {
+    let mut tools = default_tools();
+    tools.push(Arc::new(invoke_subagent::InvokeSubagentTool::new(
+        provider,
+        progress_tx,
+    )));
+    tools
+}
+
 pub mod current_dir;
 pub mod grep_code;
+pub mod invoke_subagent;
 pub mod list_dir;
 pub mod read_file;
 pub mod replace_lines;

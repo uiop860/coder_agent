@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::AtomicBool,
     mpsc::{Receiver, Sender as MpscSender},
 };
@@ -83,4 +83,9 @@ pub struct App {
     pub approval_tx: Option<MpscSender<bool>>,
     /// Pending tool approval request waiting for user input.
     pub approval_pending: Option<ToolCallInfo>,
+    /// Shared sender slot: set before each stream so InvokeSubagentTool can
+    /// forward sub-agent ToolCall/ToolCallResult events to the TUI in real time.
+    pub subagent_progress_tx: Arc<Mutex<Option<MpscSender<AgentEvent>>>>,
+    /// Receiver for the sub-agent progress side-channel (drained each frame).
+    pub subagent_rx: Option<Receiver<AgentEvent>>,
 }
