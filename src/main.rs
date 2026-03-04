@@ -90,7 +90,7 @@ struct SlashCommand {
     description: &'static str,
 }
 
-const SLASH_COMMANDS: [SlashCommand; 4] = [
+const SLASH_COMMANDS: [SlashCommand; 5] = [
     SlashCommand {
         name: "/reasoning",
         description: "Toggle reasoning / thinking display",
@@ -106,6 +106,10 @@ const SLASH_COMMANDS: [SlashCommand; 4] = [
     SlashCommand {
         name: "/clear",
         description: "Clear the conversation context",
+    },
+    SlashCommand {
+        name: "/exit",
+        description: "Exit the application",
     },
 ];
 
@@ -182,6 +186,8 @@ struct App {
     input_buffer: String,
     /// Byte index of the edit cursor within `input_buffer`.
     cursor_pos: usize,
+    /// Vertical scroll offset for the input box (in lines). Auto-follows the cursor.
+    input_scroll: u16,
     scroll_offset: usize,
     max_scroll: usize,
     scroll_up_held: bool,
@@ -247,6 +253,7 @@ impl App {
             history: Vec::new(),
             input_buffer: String::new(),
             cursor_pos: 0,
+            input_scroll: 0,
             scroll_offset: 0,
             max_scroll: 0,
             scroll_up_held: false,
@@ -532,6 +539,8 @@ impl App {
                             self.slash_selected =
                                 MODELS.iter().position(|m| m.id == current).unwrap_or(0);
                             self.slash_model_mode = true;
+                        } else if cmd == "/exit" {
+                            return true;
                         } else {
                             self.execute_slash_command(cmd);
                             self.input_buffer.clear();
@@ -595,6 +604,7 @@ impl App {
                 if !self.input_buffer.is_empty() && !self.streaming {
                     let user_input = self.input_buffer.drain(..).collect();
                     self.cursor_pos = 0;
+                    self.input_scroll = 0;
                     self.send_message(user_input);
                 }
             }
@@ -783,6 +793,15 @@ fn truncate_at_char_boundary(s: &str, max: usize) -> String {
 fn render(frame: &mut Frame, app: &mut App) {
     let input_lines = app.input_buffer.chars().filter(|&c| c == '\n').count() + 1;
     let input_height = (input_lines as u16 + 2).min(10); // +2 borders, cap 10
+
+    let visible_inner = input_height.saturating_sub(2); // inner height without borders
+    let (cur_row, _) = cursor_row_col(&app.input_buffer, app.cursor_pos);
+    if cur_row < app.input_scroll {
+        app.input_scroll = cur_row;
+    }
+    if visible_inner > 0 && cur_row >= app.input_scroll + visible_inner {
+        app.input_scroll = cur_row - visible_inner + 1;
+    }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1084,6 +1103,7 @@ fn render_input(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                     .title(title)
                     .merge_borders(MergeStrategy::Exact),
             )
+            .scroll((app.input_scroll, 0))
             .style(Style::default().fg(Color::White));
         frame.render_widget(input_widget, area);
 
@@ -1138,6 +1158,7 @@ fn render_input(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                     .title(title)
                     .merge_borders(MergeStrategy::Exact),
             )
+            .scroll((app.input_scroll, 0))
             .style(Style::default().fg(Color::Rgb(130, 60, 255)));
         frame.render_widget(input_widget, area);
     }
@@ -1152,19 +1173,16 @@ fn render_input(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         || app.displayed_output_tokens != app.total_output_tokens;
     if !app.streaming && !animating && area.height > 0 {
         let (cur_row, cur_col) = cursor_row_col(&app.input_buffer, app.cursor_pos);
+        let visible_row = cur_row.saturating_sub(app.input_scroll);
         let cursor_x = area.x + 1 + cur_col; // +1 for border
-        let cursor_y = area.y + 1 + cur_row; // +1 for border
+        let cursor_y = area.y + 1 + visible_row; // +1 for border
         if cursor_x < area.right() && cursor_y < area.bottom() {
             frame.set_cursor_position(Position::new(cursor_x, cursor_y));
         }
     }
 }
 
-fn render_approval_dialog(
-    frame: &mut Frame,
-    area: Rect,
-    info: &coder_agent::client::ToolCallInfo,
-) {
+fn render_approval_dialog(frame: &mut Frame, area: Rect, info: &coder_agent::client::ToolCallInfo) {
     let w = (area.width * 6 / 10).max(40).min(area.width);
     let h = 7u16;
     let popup = Rect::new(
