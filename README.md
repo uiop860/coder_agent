@@ -12,6 +12,37 @@ If the model issues a tool call you will see a `🔧 Tool call:` message in
 System output.  Press **Ctrl+T** to toggle display of the tool-call arguments
 (they are hidden by default), **Ctrl+R** to show/hide the reasoning
 that the model emits, and **Ctrl+D** to hide or show system/debug messages.
+
+## pre-commit
+
+```shell
+#!/bin/sh
+
+set -e
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+if ! command -v cargo >/dev/null 2>&1; then
+	echo "pre-commit: cargo not found in PATH" >&2
+	exit 1
+fi
+
+echo "pre-commit: formatting Rust code (cargo fmt --all)"
+cargo fmt --all
+
+# Stage Rust files that were changed by rustfmt.
+git add -u -- '*.rs'
+
+echo "pre-commit: formatting complete"
+
+echo "pre-commit: running lints (cargo clippy --all-targets -- -D warnings)"
+cargo clippy --all-targets -- -D warnings
+echo "pre-commit: clippy checks passed"
+
+
+```
+
 ## License
 
 Copyright (c) Oliver Stæhr <oliverstaehr96@gmail.com>
