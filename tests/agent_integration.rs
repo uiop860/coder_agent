@@ -1,6 +1,7 @@
 mod common;
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use coder_agent::agent::agent_stream;
 use coder_agent::client::{AgentEvent, ChatMessage, RequestConfig};
@@ -30,7 +31,9 @@ fn test_simple_query_no_code() {
         AgentEvent::Done,
     ]]);
 
-    let rx = agent_stream(Arc::new(provider), vec![ChatMessage::user("Hello")], cfg());
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_, approval_rx) = std::sync::mpsc::channel::<bool>();
+    let rx = agent_stream(Arc::new(provider), vec![ChatMessage::user("Hello")], cfg(), cancel, approval_rx);
     let events = collect_events(rx);
 
     assert!(
@@ -51,10 +54,14 @@ fn test_provider_error_terminates() {
         "API error: unauthorized".to_string(),
     )]]);
 
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_, approval_rx) = std::sync::mpsc::channel::<bool>();
     let rx = agent_stream(
         Arc::new(provider),
         vec![ChatMessage::user("Anything")],
         cfg(),
+        cancel,
+        approval_rx,
     );
     let events = collect_events(rx);
 
@@ -91,10 +98,14 @@ fn test_single_tool_use_cycle() {
     let mut config = cfg();
     config.tools = coder_agent::tools::default_tools();
 
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_, approval_rx) = std::sync::mpsc::channel::<bool>();
     let rx = agent_stream(
         Arc::new(provider),
         vec![ChatMessage::user("Read the project manifest file")],
         config,
+        cancel,
+        approval_rx,
     );
     let events = collect_events(rx);
 

@@ -215,6 +215,7 @@ dependencies = [
  "log",
  "pulldown-cmark",
  "ratatui",
+ "regex",
  "reqwest",
  "serde_json",
  "simplelog",

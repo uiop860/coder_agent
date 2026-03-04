@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use log::{debug, error, info, warn};
@@ -16,6 +17,7 @@ fn run_one_llm_pass(
     messages: &[ChatMessage],
     config: &RequestConfig,
     tx: &Sender<AgentEvent>,
+    cancel: &AtomicBool,
 ) -> Result<(Vec<ToolCallInfo>, String), String> {
     debug!(
         "run_one_llm_pass: starting with {} messages",
@@ -26,6 +28,9 @@ fn run_one_llm_pass(
     let mut text = String::new();
 
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".to_string());
+        }
         match rx.recv() {
             Ok(AgentEvent::Token(t)) => {
                 text.push_str(&t);
@@ -55,7 +60,7 @@ fn run_one_llm_pass(
                 let _ = tx.send(AgentEvent::Error(e.clone()));
                 return Err(e);
             }
-            Ok(AgentEvent::ToolCallResult { .. }) => {
+            Ok(AgentEvent::ToolCallResult { .. }) | Ok(AgentEvent::ToolApprovalRequest { .. }) => {
                 // Should not come from provider; ignore.
             }
             Ok(AgentEvent::Usage {
@@ -85,6 +90,8 @@ pub fn agent_stream(
     provider: Arc<dyn Provider>,
     initial_messages: Vec<ChatMessage>,
     config: RequestConfig,
+    cancel: Arc<AtomicBool>,
+    approval_rx: std::sync::mpsc::Receiver<bool>,
 ) -> Receiver<AgentEvent> {
     let (tx, rx) = mpsc::channel();
 
@@ -97,19 +104,29 @@ pub fn agent_stream(
 
         let mut messages = initial_messages;
         for iteration in 0..MAX_ITERATIONS {
+            if cancel.load(Ordering::Relaxed) {
+                let _ = tx.send(AgentEvent::Done);
+                return;
+            }
+
             debug!(
                 "agent_stream: iteration {} / {}",
                 iteration + 1,
                 MAX_ITERATIONS
             );
 
-            let (tool_calls, _text) = match run_one_llm_pass(&*provider, &messages, &config, &tx) {
-                Ok(r) => r,
-                Err(e) => {
-                    error!("agent_stream: LLM pass failed — {}", e);
-                    return;
-                }
-            };
+            let (tool_calls, _text) =
+                match run_one_llm_pass(&*provider, &messages, &config, &tx, &cancel) {
+                    Ok(r) => r,
+                    Err(e) if e == "cancelled" => {
+                        let _ = tx.send(AgentEvent::Done);
+                        return;
+                    }
+                    Err(e) => {
+                        error!("agent_stream: LLM pass failed — {}", e);
+                        return;
+                    }
+                };
 
             if tool_calls.is_empty() {
                 info!("agent_stream: no tool calls — sending Done");
@@ -124,10 +141,45 @@ pub fn agent_stream(
 
             // Execute each tool and append results
             for tc in &tool_calls {
+                if cancel.load(Ordering::Relaxed) {
+                    let _ = tx.send(AgentEvent::Done);
+                    return;
+                }
+
                 info!(
                     "agent_stream: executing tool '{}' (id={}) args={}",
                     tc.name, tc.id, tc.arguments
                 );
+
+                // Check if this tool requires approval
+                let needs_approval = config
+                    .tools
+                    .iter()
+                    .find(|t| t.definition().name == tc.name)
+                    .map(|t| t.requires_approval())
+                    .unwrap_or(false);
+
+                if needs_approval {
+                    let _ = tx.send(AgentEvent::ToolApprovalRequest { info: tc.clone() });
+                    match approval_rx.recv() {
+                        Ok(true) => { /* approved, proceed */ }
+                        Ok(false) | Err(_) => {
+                            info!(
+                                "agent_stream: tool '{}' denied by user",
+                                tc.name
+                            );
+                            let _ = tx.send(AgentEvent::ToolCallResult {
+                                info: tc.clone(),
+                                output: "Tool execution denied by user.".to_string(),
+                            });
+                            messages.push(ChatMessage::tool_result(
+                                &tc.id,
+                                "Tool execution denied by user.",
+                            ));
+                            continue;
+                        }
+                    }
+                }
 
                 let result = config
                     .tools

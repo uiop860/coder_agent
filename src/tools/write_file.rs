@@ -27,6 +27,10 @@ impl Tool for WriteFileTool {
         }
     }
 
+    fn requires_approval(&self) -> bool {
+        true
+    }
+
     fn execute(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value = serde_json::from_str(arguments)
             .map_err(|e| format!("Failed to parse arguments: {}", e))?;

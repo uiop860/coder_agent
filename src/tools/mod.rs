@@ -13,6 +13,10 @@ pub trait Tool: Send + Sync {
     /// `arguments` is a JSON string matching the tool's `parameters` schema.
     /// Returns plain-text (or JSON) output that is fed back to the model.
     fn execute(&self, arguments: &str) -> Result<String, String>;
+    /// Whether this tool requires explicit user approval before execution.
+    fn requires_approval(&self) -> bool {
+        false
+    }
 }
 
 /// Convenience: build the default set of codebase tools.
@@ -24,13 +28,16 @@ pub fn default_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(search_file::SearchFileTool),
         Arc::new(current_dir::CurrentDirTool),
         Arc::new(replace_lines::ReplaceLinesTool),
+        Arc::new(run_command::RunCommandTool),
+        Arc::new(grep_code::GrepCodeTool),
     ]
 }
 
 pub mod current_dir;
+pub mod grep_code;
 pub mod list_dir;
 pub mod read_file;
 pub mod replace_lines;
+pub mod run_command;
 pub mod search_file;
-pub mod str_replace;
 pub mod write_file;

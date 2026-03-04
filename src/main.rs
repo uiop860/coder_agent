@@ -1,7 +1,11 @@
 use std::{
     fs::OpenOptions,
     io,
-    sync::{Arc, mpsc::Receiver},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{Receiver, Sender as MpscSender},
+    },
 };
 
 use coder_agent::agent::agent_stream;
@@ -213,6 +217,12 @@ struct App {
     displayed_output_tokens: u64,
     /// Frame counter used to drive the input-border pulse animation while streaming.
     pulse_tick: u64,
+    /// Set to true to cancel the current agent stream.
+    cancel: Option<Arc<AtomicBool>>,
+    /// Channel to send approval decisions (true = approve, false = deny) to the agent thread.
+    approval_tx: Option<MpscSender<bool>>,
+    /// Pending tool approval request waiting for user input.
+    approval_pending: Option<coder_agent::client::ToolCallInfo>,
 }
 
 impl App {
@@ -257,6 +267,9 @@ impl App {
             displayed_input_tokens: 0,
             displayed_output_tokens: 0,
             pulse_tick: 0,
+            cancel: None,
+            approval_tx: None,
+            approval_pending: None,
         }
     }
 
@@ -282,10 +295,16 @@ impl App {
         });
 
         if let Some(provider) = self.provider.clone() {
+            let cancel_flag = Arc::new(AtomicBool::new(false));
+            self.cancel = Some(cancel_flag.clone());
+            let (approval_tx, approval_rx) = std::sync::mpsc::channel::<bool>();
+            self.approval_tx = Some(approval_tx);
             self.rx = Some(agent_stream(
                 provider,
                 self.history.clone(),
                 self.config.clone(),
+                cancel_flag,
+                approval_rx,
             ));
             self.streaming = true;
             self.scroll_to_bottom();
@@ -375,6 +394,11 @@ impl App {
                     });
                     self.scroll_to_bottom();
                 }
+                Ok(AgentEvent::ToolApprovalRequest { info }) => {
+                    self.approval_pending = Some(info);
+                    // Agent thread is now blocked; TUI will show modal
+                    break;
+                }
                 Ok(AgentEvent::Done) => {
                     // Persist completed response into history, then clear reasoning
                     if let Some(last) = self.messages.last_mut() {
@@ -387,6 +411,9 @@ impl App {
                     }
                     self.rx = None;
                     self.streaming = false;
+                    self.cancel = None;
+                    self.approval_tx = None;
+                    self.approval_pending = None;
                     break;
                 }
                 Ok(AgentEvent::Usage {
@@ -403,6 +430,9 @@ impl App {
                     }
                     self.rx = None;
                     self.streaming = false;
+                    self.cancel = None;
+                    self.approval_tx = None;
+                    self.approval_pending = None;
                     break;
                 }
                 Err(_) => break, // no more events right now
@@ -411,6 +441,28 @@ impl App {
     }
 
     fn handle_key_event(&mut self, key: KeyEvent) -> bool {
+        // ── Approval modal — highest priority ────────────────────────────────
+        if self.approval_pending.is_some() {
+            if key.kind == KeyEventKind::Press {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        if let Some(tx) = &self.approval_tx {
+                            let _ = tx.send(true);
+                        }
+                        self.approval_pending = None;
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') => {
+                        if let Some(tx) = &self.approval_tx {
+                            let _ = tx.send(false);
+                        }
+                        self.approval_pending = None;
+                    }
+                    _ => {}
+                }
+            }
+            return false; // consume all events while modal is active
+        }
+
         match key.kind {
             KeyEventKind::Release => {
                 match key.code {
@@ -513,8 +565,31 @@ impl App {
         }
 
         match (key.code, key.modifiers) {
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
-                return true; // Signal to quit
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                return true; // Always quit
+            }
+            (KeyCode::Esc, _) => {
+                if self.streaming {
+                    if let Some(c) = &self.cancel {
+                        c.store(true, Ordering::Relaxed);
+                    }
+                    self.rx = None;
+                    self.streaming = false;
+                    self.cancel = None;
+                    self.approval_tx = None;
+                    self.approval_pending = None;
+                    if let Some(last) = self.messages.last_mut() {
+                        if matches!(last.sender, Sender::Agent) && last.content.is_empty() {
+                            last.content = "[cancelled]".to_string();
+                        }
+                    }
+                } else {
+                    return true; // quit
+                }
+            }
+            (KeyCode::Enter, KeyModifiers::SHIFT) => {
+                self.input_buffer.insert(self.cursor_pos, '\n');
+                self.cursor_pos += 1;
             }
             (KeyCode::Enter, _) => {
                 if !self.input_buffer.is_empty() && !self.streaming {
@@ -684,13 +759,37 @@ fn app(terminal: &mut DefaultTerminal, provider: Option<Arc<dyn Provider>>) -> i
     }
 }
 
+fn cursor_row_col(s: &str, pos: usize) -> (u16, u16) {
+    let before = &s[..pos];
+    let row = before.chars().filter(|&c| c == '\n').count() as u16;
+    let last_nl = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = UnicodeWidthStr::width(&before[last_nl..]) as u16;
+    (row, col)
+}
+
+fn truncate_at_char_boundary(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let end = s
+        .char_indices()
+        .take_while(|(i, _)| *i < max)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(max);
+    format!("{}...", &s[..end])
+}
+
 fn render(frame: &mut Frame, app: &mut App) {
+    let input_lines = app.input_buffer.chars().filter(|&c| c == '\n').count() + 1;
+    let input_height = (input_lines as u16 + 2).min(10); // +2 borders, cap 10
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(0),
-            Constraint::Length(3),
+            Constraint::Length(input_height),
         ])
         .spacing(Spacing::Overlap(1))
         .split(frame.area());
@@ -704,6 +803,11 @@ fn render(frame: &mut Frame, app: &mut App) {
     // Render slash-command popover (above input, when active)
     if app.slash_mode || app.slash_model_mode {
         render_slash_popover(frame, chunks[2], app);
+    }
+
+    // Render approval dialog if waiting for approval
+    if let Some(ref info) = app.approval_pending {
+        render_approval_dialog(frame, frame.area(), info);
     }
 
     // Render input area
@@ -964,7 +1068,7 @@ fn render_model_picker(frame: &mut Frame, input_area: Rect, app: &App) {
 }
 
 fn render_input(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
-    let input_text = format!("> {}", app.input_buffer);
+    let input_text = app.input_buffer.clone();
     let title = if app.streaming {
         "Input – waiting for response…"
     } else {
@@ -1047,14 +1151,57 @@ fn render_input(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     let animating = app.displayed_input_tokens != app.total_input_tokens
         || app.displayed_output_tokens != app.total_output_tokens;
     if !app.streaming && !animating && area.height > 0 {
-        let before_cursor = &app.input_buffer[..app.cursor_pos];
-        let display_width = UnicodeWidthStr::width(before_cursor) as u16;
-        let cursor_x = area.x + 1 + 2 + display_width;
-        let cursor_y = area.y + 1;
+        let (cur_row, cur_col) = cursor_row_col(&app.input_buffer, app.cursor_pos);
+        let cursor_x = area.x + 1 + cur_col; // +1 for border
+        let cursor_y = area.y + 1 + cur_row; // +1 for border
         if cursor_x < area.right() && cursor_y < area.bottom() {
-            frame.set_cursor_position(Position::new(cursor_x.min(area.right() - 1), cursor_y));
+            frame.set_cursor_position(Position::new(cursor_x, cursor_y));
         }
     }
+}
+
+fn render_approval_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    info: &coder_agent::client::ToolCallInfo,
+) {
+    let w = (area.width * 6 / 10).max(40).min(area.width);
+    let h = 7u16;
+    let popup = Rect::new(
+        area.x + (area.width.saturating_sub(w)) / 2,
+        area.y + (area.height.saturating_sub(h)) / 2,
+        w,
+        h,
+    );
+    let args_display = truncate_at_char_boundary(&info.arguments, 60);
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  Tool: {}", info.name),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("  Args: {}", args_display),
+            Style::default().fg(Color::Gray),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  [y] Approve    [n] Deny",
+            Style::default().fg(Color::Cyan),
+        )),
+    ];
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Approval Required")
+                .border_style(Style::default().fg(Color::Yellow)),
+        ),
+        popup,
+    );
 }
 
 /// Return the context-window size for a known model id, or a generic fallback.

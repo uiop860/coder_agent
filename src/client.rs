@@ -17,6 +17,9 @@ pub enum AgentEvent {
         info: ToolCallInfo,
         output: String,
     },
+    ToolApprovalRequest {
+        info: ToolCallInfo,
+    },
     /// Token usage reported by the provider at the end of a response.
     Usage {
         input_tokens: u64,

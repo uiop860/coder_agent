@@ -5,6 +5,7 @@
 ///
 /// All tests are marked `#[ignore]` so they are skipped in normal CI runs.
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use coder_agent::agent::agent_stream;
@@ -85,12 +86,16 @@ fn test_live_plain_text_response() {
     let provider = live_provider();
     let config = live_config();
 
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_, approval_rx) = std::sync::mpsc::channel::<bool>();
     let rx = agent_stream(
         provider,
         vec![ChatMessage::user(
             "Reply with exactly three words: one two three",
         )],
         config,
+        cancel,
+        approval_rx,
     );
 
     let events = collect_with_timeout(rx, Duration::from_secs(60));
@@ -122,12 +127,16 @@ fn test_live_tool_call_list_directory() {
     let provider = live_provider();
     let config = live_config();
 
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_, approval_rx) = std::sync::mpsc::channel::<bool>();
     let rx = agent_stream(
         provider,
         vec![ChatMessage::user(
             "Use the list_directory tool to list the current directory and tell me what you see.",
         )],
         config,
+        cancel,
+        approval_rx,
     );
 
     let events = collect_with_timeout(rx, Duration::from_secs(120));
