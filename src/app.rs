@@ -142,7 +142,7 @@ impl App {
             match ev {
                 AgentEvent::ToolCall(tc) => {
                     let tool_name = tc.name.clone();
-                    let diff_preview = if tool_name == "replace_lines" {
+                    let diff_preview = if tool_name == "edit_file" {
                         coder_agent::diff::compute_replace_diff_text(&tc.arguments)
                     } else {
                         None
@@ -208,7 +208,7 @@ impl App {
                     // Replace the empty Agent placeholder with the tool call message
                     // so there's no blank Agent line above it.
                     let tool_name = tc.name.clone();
-                    let diff_preview = if tool_name == "replace_lines" {
+                    let diff_preview = if tool_name == "edit_file" {
                         coder_agent::diff::compute_replace_diff_text(&tc.arguments)
                     } else {
                         None

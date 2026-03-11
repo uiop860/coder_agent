@@ -31,7 +31,7 @@ pub struct Message {
     /// sender is Tool). Used to show minimal tool name when show_tools is false.
     pub tool_name: Option<String>,
     /// Pre-computed plain-text diff preview (with +/- prefixes) for
-    /// replace_lines calls. Rendered with colour in the messages pane.
+    /// edit_file calls. Rendered with colour in the messages pane.
     pub diff_preview: Option<String>,
 }
 

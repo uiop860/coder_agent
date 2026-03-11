@@ -33,7 +33,7 @@ pub struct ModelOption {
     pub context_window: u64,
 }
 
-pub const MODELS: [ModelOption; 4] = [
+pub const MODELS: [ModelOption; 5] = [
     ModelOption {
         label: "Nemotron 3 Nano 30B (free)",
         id: "nvidia/nemotron-3-nano-30b-a3b:free",
@@ -52,6 +52,11 @@ pub const MODELS: [ModelOption; 4] = [
     ModelOption {
         label: "GLM-4.5 Air (free)",
         id: "z-ai/glm-4.5-air:free",
+        context_window: 131_072,
+    },
+    ModelOption {
+        label: "Qwen3 235B Thinking (free)",
+        id: "qwen/qwen3-235b-a22b-thinking-2507",
         context_window: 131_072,
     },
 ];

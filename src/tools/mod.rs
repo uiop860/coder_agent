@@ -27,7 +27,7 @@ pub fn default_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(list_dir::ListDirTool),
         Arc::new(search_file::SearchFileTool),
         Arc::new(current_dir::CurrentDirTool),
-        Arc::new(replace_lines::ReplaceLinesTool),
+        Arc::new(replace_lines::EditFileTool),
         Arc::new(run_command::RunCommandTool),
         Arc::new(grep_code::GrepCodeTool),
     ]

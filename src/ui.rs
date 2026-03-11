@@ -192,21 +192,22 @@ pub fn render_messages(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut
             };
             lines.extend(content_lines);
 
-            // For replace_lines tool calls, render the diff preview with colour.
+            // For edit_file tool calls, render the diff preview with colour.
             // Always shown regardless of the show_tools toggle.
             if matches!(msg.sender, Sender::Tool)
-                && let Some(ref diff_text) = msg.diff_preview {
-                    for diff_line in diff_text.lines() {
-                        let style = if diff_line.starts_with("+ ") {
-                            Style::default().fg(Color::Green)
-                        } else if diff_line.starts_with("- ") {
-                            Style::default().fg(Color::Red)
-                        } else {
-                            Style::default().fg(Color::DarkGray)
-                        };
-                        lines.push(Line::from(Span::styled(diff_line.to_string(), style)));
-                    }
+                && let Some(ref diff_text) = msg.diff_preview
+            {
+                for diff_line in diff_text.lines() {
+                    let style = if diff_line.starts_with("+ ") {
+                        Style::default().fg(Color::Green)
+                    } else if diff_line.starts_with("- ") {
+                        Style::default().fg(Color::Red)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    lines.push(Line::from(Span::styled(diff_line.to_string(), style)));
                 }
+            }
 
             // Blank separator between messages
             lines.push(Line::from(Span::raw("")));

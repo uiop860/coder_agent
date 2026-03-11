@@ -4,23 +4,15 @@ use similar::{ChangeTag, TextDiff};
 
 use crate::client::ToolCallInfo;
 
-/// Compute a compact plain-text diff for a `replace_lines` tool call.
+/// Compute a compact plain-text diff for an `edit_file` tool call.
 /// Lines are prefixed with `+ ` (insert), `- ` (delete), or `  ` (context).
-/// Returns None if args cannot be parsed or the file cannot be read.
+/// Returns None if args cannot be parsed.
 pub fn compute_replace_diff_text(args: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(args).ok()?;
-    let path = v.get("path")?.as_str()?;
-    let start = v.get("start_line")?.as_u64()? as usize;
-    let end = v.get("end_line")?.as_u64()? as usize;
-    let new_content = v.get("new_content")?.as_str()?;
+    let old_chunk = v.get("old_string")?.as_str()?;
+    let new_content = v.get("new_string")?.as_str()?;
 
-    let old_file = std::fs::read_to_string(path).ok()?;
-    let old_lines: Vec<&str> = old_file.lines().collect();
-    let start_idx = start.saturating_sub(1);
-    let end_idx = end.min(old_lines.len());
-    let old_chunk = old_lines[start_idx..end_idx].join("\n");
-
-    let diff = TextDiff::from_lines(old_chunk.as_str(), new_content);
+    let diff = TextDiff::from_lines(old_chunk, new_content);
 
     let rows: Vec<(ChangeTag, String)> = diff
         .iter_all_changes()
@@ -68,12 +60,12 @@ pub fn compute_replace_diff_text(args: &str) -> Option<String> {
 }
 
 /// Build a coloured before/after diff preview for `write_file` and
-/// `replace_lines` tool calls.  Returns an empty vec for all other tools,
+/// `edit_file` tool calls.  Returns an empty vec for all other tools,
 /// causing the approval modal to fall back to its plain "Args:" display.
 pub fn compute_diff_preview(info: &ToolCallInfo, max_lines: usize) -> Vec<Line<'static>> {
     match info.name.as_str() {
         "write_file" => diff_write_file(&info.arguments, max_lines),
-        "replace_lines" => diff_replace_lines(&info.arguments, max_lines),
+        "edit_file" => diff_edit_file(&info.arguments, max_lines),
         _ => vec![],
     }
 }
@@ -96,45 +88,34 @@ fn diff_write_file(args: &str, max_lines: usize) -> Vec<Line<'static>> {
     build_diff_lines(&old_content, &new_content, None, max_lines)
 }
 
-fn diff_replace_lines(args: &str, max_lines: usize) -> Vec<Line<'static>> {
+fn diff_edit_file(args: &str, max_lines: usize) -> Vec<Line<'static>> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
         return vec![];
     };
-    let path = v
-        .get("path")
+    let file_path = v
+        .get("file_path")
         .and_then(|p| p.as_str())
         .unwrap_or("")
         .to_string();
-    let start = v
-        .get("start_line")
-        .and_then(|n| n.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or(1);
-    let end = v
-        .get("end_line")
-        .and_then(|n| n.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or(start);
-    let new_content = v
-        .get("new_content")
+    let old_string = v
+        .get("old_string")
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+    let new_string = v
+        .get("new_string")
         .and_then(|c| c.as_str())
         .unwrap_or("")
         .to_string();
 
-    let old_file = std::fs::read_to_string(&path).unwrap_or_default();
-    let old_lines: Vec<&str> = old_file.lines().collect();
-    let start_idx = start.saturating_sub(1);
-    let end_idx = end.min(old_lines.len());
-    let old_chunk = old_lines[start_idx..end_idx].join("\n");
-
-    let header = format!("  {}:{}-{}", path, start, end);
+    let header = format!("  {}", file_path);
     let mut lines = vec![Line::from(Span::styled(
         header,
         Style::default().fg(Color::DarkGray),
     ))];
     lines.extend(build_diff_lines(
-        &old_chunk,
-        &new_content,
+        &old_string,
+        &new_string,
         None,
         max_lines.saturating_sub(1),
     ));
